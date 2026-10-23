@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xihan-framework"
+version = "0.0.1"
+description = "XiHan Framework SDK for Python: primitives, manifest, invocation context, pipeline and plugin runtime (placeholder release; implementation planned)."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+authors = [{ name = "XiHanFun" }]
+keywords = ["xihan", "framework", "plugin"]
+classifiers = [
+  "Development Status :: 1 - Planning",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://framework.xihanfun.com"
+Repository = "https://github.com/XiHanFun/framework-sdk-python"
+Specification = "https://github.com/XiHanFun/framework-spec"
+Issues = "https://github.com/XiHanFun/framework-sdk-python/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xihan_framework"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/xihan_framework", "README.md", "LICENSE", "pyproject.toml"]

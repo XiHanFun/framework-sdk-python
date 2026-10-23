@@ -34,6 +34,18 @@ Reference（.NET）、Stable（通过全部向量）、Experimental（部分向�
 2. 在本仓库开 Issue 认领要实现的包，一个包一个 PR，附向量测试。
 3. 公开契约的变更不在 SDK 仓库里做：走 framework-spec 的 RFC 流程，再同步到各 SDK。
 
+## 发布占位版本
+
+名字靠上传一个占位版本占住（PyPI 没有预留机制）。本仓库已含最小包（`pyproject.toml` + `src/xihan_framework/`，只导出 `__version__` 与 `SPEC_VERSION`）：
+
+```bash
+python -m pip install build twine
+python -m build
+python -m twine upload dist/*
+```
+
+上传时用户名填 `__token__`、密码填 PyPI 的 API token。`xihan-framework` 与 `xihan_framework` 在 PyPI 是同一个名字；导入名是 `xihan_framework`。
+
 ## 许可
 
 [MIT](LICENSE)
