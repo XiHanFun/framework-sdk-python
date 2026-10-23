@@ -36,7 +36,7 @@ Reference（.NET）、Stable（通过全部向量）、Experimental（部分向�
 
 ## 发布占位版本
 
-名字靠上传一个占位版本占住（PyPI 没有预留机制）。本仓库已含最小包（`pyproject.toml` + `src/xihan_framework/`，只导出 `__version__` 与 `SPEC_VERSION`）：
+**已发布**：[PyPI 上的 `xihan-framework` 0.0.1](https://pypi.org/project/xihan-framework/)（2026-10-23），名字已占住。名字靠上传一个占位版本占住（PyPI 没有预留机制）。本仓库已含最小包（`pyproject.toml` + `src/xihan_framework/`，只导出 `__version__` 与 `SPEC_VERSION`）：
 
 ```bash
 python -m pip install build twine
