@@ -1,7 +1,7 @@
 """XiHan Framework 原语层（RFC-0001）的 Python 形态。
 
 错误与错误码、``Result``、``Maybe``、类型化标识、生命周期状态、管道阶段、稳定性、Baggage 键与消息原语。
-零行为、零依赖、只增不改；语义与线上编码和 .NET 参考实现、Go SDK 一致，由 framework-spec 的一致性向量验证。
+零行为、零依赖、只增不改；语义与线上编码以规范为准、与 .NET 参考实现一致，由 framework-spec 的一致性向量验证。
 """
 
 from xihan_framework._json import JsonValue

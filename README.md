@@ -1,6 +1,6 @@
 # XiHan Framework SDK for Python
 
-[XiHan Framework Spec](https://github.com/XiHanFun/framework-spec) 的 Python 实现：原语层、清单、调用上下文、管道与操作契约。语义与线上编码和 .NET 参考实现（[XiHan.Framework](https://github.com/XiHanFun/XiHan.Framework)）、Go SDK（[framework-sdk-go](https://github.com/XiHanFun/framework-sdk-go)）一致；规范以 submodule 放在 `spec/`，一致性由规范仓库的向量验证。面向 Python 应用、脚本型插件与 AI 工具链，Python 3.12+，运行时零依赖，处理器与中间件基于 asyncio。
+[XiHan Framework Spec](https://github.com/XiHanFun/framework-spec) 的 Python 实现：原语层、清单、调用上下文、管道与操作契约。语义与线上编码以规范为准（各语言 SDK 共用的线上细节、模板与内核错误由 ADR-0233 定下），与 .NET 参考实现（[XiHan.Framework](https://github.com/XiHanFun/XiHan.Framework)）一致，形状参照 Go SDK（[framework-sdk-go](https://github.com/XiHanFun/framework-sdk-go)）；规范以 submodule 放在 `spec/`，一致性由规范仓库的向量验证。面向 Python 应用、脚本型插件与 AI 工具链，Python 3.12+，运行时零依赖，处理器与中间件基于 asyncio。
 
 ```bash
 pip install xihan-framework
