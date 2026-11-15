@@ -42,8 +42,10 @@ path = "src/xihan_framework/__init__.py"
 packages = ["src/xihan_framework"]
 
 [tool.hatch.build.targets.sdist]
-# spec/ 与 tests/ 不进 sdist：测试读取 spec/ 下的一致性向量，只在仓库检出里运行
-include = ["src/xihan_framework", "README.md", "LICENSE", "pyproject.toml"]
+# spec/ 与 tests/ 不进 sdist：测试读取 spec/ 下的一致性向量，只在仓库检出里运行；
+# 路径以 / 开头锚定在仓库根，否则 README.md、LICENSE 会匹配到 spec/ 里的同名文件
+include = ["/src/xihan_framework", "/README.md", "/LICENSE", "/pyproject.toml"]
+exclude = ["/spec", "/tests"]
 
 [tool.ruff]
 line-length = 120
