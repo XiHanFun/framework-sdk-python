@@ -33,6 +33,8 @@ ERROR_CODE_CANCELLED: Final = "KERNEL_CANCELLED_001"
 MESSAGE_DEADLINE_EXCEEDED: Final = "kernel.invocation.deadline_exceeded"
 #: 取消的消息键。
 MESSAGE_CANCELLED: Final = "kernel.invocation.cancelled"
+#: 调用开始时截止时间已过的消息键（码同样是 ``KERNEL_TIMEOUT_001``）。
+MESSAGE_DEADLINE_BEFORE_START: Final = "kernel.invocation.deadline_before_start"
 
 # W3C traceparent：version-traceid-spanid-flags，全小写十六进制
 _TRACE_PARENT = re.compile(r"([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})")
@@ -76,6 +78,11 @@ def deadline_exceeded_error() -> Error:
 def cancelled_error() -> Error:
     """取消的原语层错误（``KERNEL_CANCELLED_001``）。"""
     return Error.cancelled(ERROR_CODE_CANCELLED, MESSAGE_CANCELLED)
+
+
+def deadline_before_start_error() -> Error:
+    """调用开始时截止时间已过的原语层错误（``KERNEL_TIMEOUT_001`` + ``kernel.invocation.deadline_before_start``）。"""
+    return Error.timeout(ERROR_CODE_DEADLINE_EXCEEDED, MESSAGE_DEADLINE_BEFORE_START)
 
 
 def _ignore() -> None:
@@ -386,12 +393,13 @@ class Context:
     async def run[T](self, call: Coroutine[Any, Any, Result[T]]) -> Result[T]:
         """在截止时间与取消信号下执行协程，超时与取消翻译成失败结果。
 
-        进入前已过期或已取消时不执行（关闭协程）。截止时间的定时器触发时取消协程并返回 ``KERNEL_TIMEOUT_001``；信号
+        进入前已过期（``kernel.invocation.deadline_before_start``）或已取消时不执行（关闭协程）。截止时间的定时器触发时取消协程并返回 ``KERNEL_TIMEOUT_001``；信号
         触发时取消协程并返回 ``KERNEL_CANCELLED_001``；两者都触发时报超时。协程自己接住取消、写下 ``KERNEL_CANCELLED_001``
         结果而定时器已触发时，改写为超时（RFC-0004「行为变化」）；它写下的其他结果原样返回。任务被别处取消（不是这个
         信号）时 ``CancelledError`` 照常向外传播，不翻译成结果。
         """
-        error = self.cancellation_error()
+        # 进入前的核对：截止时间已过报超时（用 deadline_before_start 的键），否则信号已触发报取消
+        error = deadline_before_start_error() if self.is_expired() else self.cancellation_error()
         if error is not None:
             call.close()
             return fail(error)

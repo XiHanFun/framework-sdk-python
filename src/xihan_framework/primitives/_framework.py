@@ -34,6 +34,17 @@ class FrameworkError(ValueError):
         super().__init__(code, message)
         self._code = code
         self._message = message
+        self._error: Error | None = None
+
+    @classmethod
+    def of(cls, error: "Error") -> "FrameworkError":
+        """用一个带消息键与参数的错误创建：码与消息取自它，``to_error`` 原样交回它，键与参数不丢。
+
+        配置期的内核错误（如 ``KERNEL_OPERATION_001``）以异常交给调用方时用它，码、键与参数与 kernel-messages 向量一致。
+        """
+        raised = cls(error.code, error.message)
+        raised._error = error
+        return raised
 
     @property
     def code(self) -> str:
@@ -53,7 +64,9 @@ class FrameworkError(ValueError):
         return text
 
     def to_error(self) -> "Error":
-        """转成可上线的 ``Error``（``Error.literal``，带已解析的文案）；错误码不合法时取 ``PRIMITIVES_VALIDATION_001``。"""
+        """转成可上线的 ``Error``：经 ``of`` 创建的交回原来的错误；否则是 ``Error.literal``（带已解析的文案），错误码不合法时取 ``PRIMITIVES_VALIDATION_001``。"""
+        if self._error is not None:
+            return self._error
         from xihan_framework.primitives._error import Error
         from xihan_framework.primitives._error_code import ERROR_CODE_INVALID_ARGUMENT, is_error_code
 

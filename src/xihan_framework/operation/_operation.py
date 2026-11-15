@@ -42,6 +42,10 @@ MESSAGE_INVALID_PAYLOAD: Final = "kernel.operation.invalid_payload"
 MESSAGE_TYPE_MISMATCH: Final = "kernel.operation.type_mismatch"
 #: 管道成功结束却没有执行操作的消息键（参数 ``id``）。
 MESSAGE_NO_RESPONSE: Final = "kernel.operation.no_response"
+#: 操作 ID 重复登记的消息键（参数 ``id``、``owner``）。
+MESSAGE_DUPLICATE: Final = "kernel.operation.duplicate"
+#: 操作登记表已满的消息键（参数 ``capacity``）。
+MESSAGE_REGISTRY_FULL: Final = "kernel.operation.registry_full"
 
 #: 登记表的容量。
 CAPACITY: Final = 10000
@@ -244,7 +248,8 @@ class Registry:
     ) -> Descriptor:
         """登记一个操作并返回它的描述。
 
-        重复抛出 ``FrameworkError``（``KERNEL_OPERATION_001``），满了抛出 ``KERNEL_OPERATION_002``，归属为空抛出
+        重复抛出 ``FrameworkError``（``KERNEL_OPERATION_001`` + ``kernel.operation.duplicate``），满了抛出
+        ``KERNEL_OPERATION_002`` + ``kernel.operation.registry_full``（``to_error()`` 交回带键与参数的错误），归属为空抛出
         ``PRIMITIVES_VALIDATION_001``；请求类型不能从 JSON 解码时抛出 ``TypeError``。
         """
         if not owner:
@@ -255,12 +260,14 @@ class Registry:
         descriptor = Descriptor(contract, handler, request_type, response_type, schema, owner)
         # 重复与容量在同一把锁里判定和写入，并发登记不会越过容量或写进两个同 ID 的操作
         with self._lock:
-            if contract.id in self._descriptors:
-                raise FrameworkError(ERROR_CODE_DUPLICATE, f"The operation '{contract.id}' is already registered.")
-            if len(self._descriptors) >= CAPACITY:
-                raise FrameworkError(
-                    ERROR_CODE_REGISTRY_FULL, f"The operation registry is full ({CAPACITY} operations)."
+            existing = self._descriptors.get(contract.id)
+            if existing is not None:
+                # 码、键与参数照 kernel-messages 向量；以异常交给调用方是 Python 的形态，to_error() 还原出同一个错误
+                raise FrameworkError.of(
+                    Error(ERROR_CODE_DUPLICATE, MESSAGE_DUPLICATE, {"id": contract.id, "owner": existing.owner})
                 )
+            if len(self._descriptors) >= CAPACITY:
+                raise FrameworkError.of(Error(ERROR_CODE_REGISTRY_FULL, MESSAGE_REGISTRY_FULL, {"capacity": CAPACITY}))
             self._descriptors[contract.id] = descriptor
         return descriptor
 

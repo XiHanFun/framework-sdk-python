@@ -20,7 +20,8 @@ from xihan_framework.primitives._error_code import (
     validate_error_code,
 )
 from xihan_framework.primitives._framework import FrameworkError
-from xihan_framework.primitives._messages import describe, is_message_key, resolve_message
+from xihan_framework.primitives._kernel_messages import BUILT_IN_CATALOG
+from xihan_framework.primitives._messages import DEFAULT_LOCALE, describe, is_message_key, resolve_message
 
 
 class Error:
@@ -149,12 +150,17 @@ class Error:
 
     @property
     def message(self) -> str:
-        """面向人的消息：已解析的文案；否则按进程默认区域解析消息键；再否则 ``键 (参数)``；没有键时是错误码。"""
+        """面向人的消息：已解析的文案；否则按进程默认区域解析消息键，再找 SDK 自带的默认英文模板；都解析不了时是 ``键 (参数)``。
+
+        没有键时（``literal`` 之外不会出现）是错误码。解析按严格格式化：模板的占位符缺值时退回描述。
+        """
         if self._text is not None:
             return self._text
         if self._message_key is None:
             return self._code
         resolved = resolve_message(self._message_key, self._details)
+        if resolved is None:
+            resolved = BUILT_IN_CATALOG.resolve(self._message_key, DEFAULT_LOCALE, self._details)
         return resolved if resolved is not None else describe(self._message_key, self._details)
 
     def with_code(self, code: str) -> "Error":

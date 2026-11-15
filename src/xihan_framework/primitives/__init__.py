@@ -42,6 +42,7 @@ from xihan_framework.primitives._framework import (
     FrameworkError,
 )
 from xihan_framework.primitives._id import TypedId
+from xihan_framework.primitives._kernel_messages import BUILT_IN_CATALOG, MESSAGE_UNINITIALIZED_RESULT
 from xihan_framework.primitives._lifecycle import LifecycleState
 from xihan_framework.primitives._maybe import Maybe
 from xihan_framework.primitives._messages import (
@@ -71,6 +72,7 @@ __all__ = [
     "BAGGAGE_LOCALE",
     "BAGGAGE_PRINCIPAL",
     "BAGGAGE_TENANT",
+    "BUILT_IN_CATALOG",
     "DEFAULT_LOCALE",
     "DOCUMENTATION",
     "ERROR_CODE_INVALID_ARGUMENT",
@@ -84,6 +86,7 @@ __all__ = [
     "KIND_UNEXPECTED",
     "KIND_VALIDATION",
     "MAX_MESSAGE_KEY_LENGTH",
+    "MESSAGE_UNINITIALIZED_RESULT",
     "NAME",
     "REGISTERED_BAGGAGE_KEYS",
     "REPOSITORY",
