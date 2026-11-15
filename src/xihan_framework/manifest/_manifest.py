@@ -26,7 +26,8 @@ _ACTIVATION = re.compile(r"onStartup|onOperation:[a-z0-9.*-]+|onEvent:[a-z0-9.*-
 _PERMISSION = re.compile(r"(?:net\.outbound|fs\.read|fs\.write|capability):.+")
 _BINDING_NAME = re.compile(r"[a-z][a-z0-9-]*")
 _BINDING_TYPE = re.compile(r"[a-z]+(?::[a-z]+)?")
-_OPERATION = re.compile(r"[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*")
+# 操作 ID 文法（RFC-0011、conventions/operation-ids.md）：连字符只在字母数字之间，不开头、不结尾、不连写
+_OPERATION = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
 _SECTION = re.compile(r"XiHan:[A-Z][A-Za-z0-9]*(?::[A-Z][A-Za-z0-9]*)*")
 _HEALTH = re.compile(r"[a-z][a-z0-9.-]*")
 _PERMISSION_CODE = re.compile(r"[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+")

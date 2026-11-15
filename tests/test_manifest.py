@@ -291,3 +291,20 @@ def test_read_file_reads_and_reports_missing_files(tmp_path: Path) -> None:
         manifest.read_file(tmp_path / "missing.json")
     assert raised.value.message == "The manifest file could not be read."
     assert isinstance(raised.value.__cause__, OSError)
+
+
+def test_contributed_operations_follow_the_operation_id_grammar() -> None:
+    # RFC-0002 解析规则 2（ADR-0233）：contributes.operations 的每一项符合操作 ID 文法，与 operation.is_id 同一条
+    for operation_id in ["orders.create", "order-lines.list", "a1.b2", "items-v2.get-many"]:
+        assert manifest.read(manifest_json(contributes={"operations": [operation_id]})).operations == (operation_id,)
+    for operation_id in [
+        "orders-.create",
+        "-orders.create",
+        "orders.create-",
+        "or--ders.create",
+        "orders.cre--ate",
+        "orders",
+        "Orders.create",
+        "orders.create\n",
+    ]:
+        assert_rejected(manifest_json(contributes={"operations": [operation_id]}))
