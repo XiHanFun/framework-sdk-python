@@ -316,3 +316,29 @@ def test_contexts_drop_unacceptable_baggage_values(vector: Callable[[str, str], 
         assert ctx.baggage["xihan.note"] == value
         derived = Context(baggage={BAGGAGE_CORRELATION: "c1"}).with_baggage(BAGGAGE_CORRELATION, value)
         assert derived.correlation == "c1", value
+
+
+def test_trace_flags_are_kept_and_written() -> None:
+    # 没有上游时标志为空，写出 01；上游的 00 原样写出；其余位原样保留，采样只看最低位（RFC-0003 规则 7）
+    root = Context()
+    assert root.trace_flags is None
+    assert root.sampled
+    assert root.trace_parent.endswith("-01")
+    upstream = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-"
+    for flags, sampled in [("00", False), ("01", True), ("03", True), ("02", False), ("ff", True)]:
+        ctx = Context(trace_parent=upstream + flags)
+        assert ctx.trace_flags == int(flags, 16)
+        assert ctx.sampled is sampled, flags
+        assert ctx.trace_parent == upstream + flags
+        assert ctx.with_baggage(BAGGAGE_TENANT, "t1").trace_parent == upstream + flags
+    parsed = parse_trace_parent(upstream + "03")
+    assert parsed is not None
+    assert parsed.flags == 3
+    assert parsed.sampled
+    explicit = Context(trace_id="1" * 32, span_id="2" * 16, trace_flags=0)
+    assert explicit.trace_parent == f"00-{'1' * 32}-{'2' * 16}-00"
+    assert Context(trace_id="1" * 32).trace_parent.endswith("-01")
+    with pytest.raises(FrameworkError):
+        Context(trace_flags=256)
+    with pytest.raises(FrameworkError):
+        Context(trace_parent=upstream + "01", trace_flags=1)
