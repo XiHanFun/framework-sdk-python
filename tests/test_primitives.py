@@ -363,3 +363,36 @@ def test_json_is_written_like_go_encoding_json() -> None:
         _json.dumps(float("inf"))
     with pytest.raises(ValueError, match="not valid JSON"):
         _json.loads("NaN")
+
+
+def test_error_encoding_and_descriptions_match_the_go_sdk_output() -> None:
+    # 期望值是 Go SDK（framework-sdk-go）对同样输入的实际输出：json.Marshal(err) 与 primitives.Describe
+    inner = Error.literal("KERNEL_UNEXPECTED_001", "boom <&>")
+    details: dict[str, JsonValue] = {
+        "z": 1.5,
+        "a": {"y": [1, "x", True, None, 2.0, 1e21, 1e-7], "b": "\u2028\t"},
+        "m": 123456789.0,
+    }
+    error = Error.unexpected("ORDERS_UNEXPECTED_001", "orders.failed", details, inner)
+    # 原始字符串：JSON 里的转义（\u2028、\t、\u003c）都是字面的反斜杠序列
+    assert error.to_json() == (
+        r'{"code":"ORDERS_UNEXPECTED_001","message":"orders.failed (a=map[b:\u2028\t y:[1 x true \u003cnil\u003e 2 '
+        r'1e+21 1e-07]], m=1.23456789e+08, z=1.5)","messageKey":"orders.failed","details":{"a":{"b":"\u2028\t",'
+        r'"y":[1,"x",true,null,2,1e+21,1e-7]},"m":123456789,"z":1.5},"inner":{"code":"KERNEL_UNEXPECTED_001",'
+        r'"message":"boom \u003c\u0026\u003e"}}'
+    )
+    arguments: dict[str, object] = {
+        "b": True,
+        "n": None,
+        "f": 1e6,
+        "g": 100000.0,
+        "h": 0.00001,
+        "l": [1, "a"],
+        "m": {"b": 1, "a": 2},
+        "i": 42,
+        "s": "x",
+    }
+    assert primitives.describe("orders.failed", arguments) == (
+        "orders.failed (b=true, f=1e+06, g=100000, h=1e-05, i=42, l=[1 a], m=map[a:2 b:1], n=<nil>, s=x)"
+    )
+    assert primitives.format_message("{0} of {count:%03d} {x:N2}", {"0": "a", "count": 7, "x": 1.5}) == "a of 007 1.5"
