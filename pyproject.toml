@@ -61,7 +61,6 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 strict = true
 python_version = "3.12"
 files = ["src", "tests"]
-warn_unreachable = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

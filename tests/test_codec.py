@@ -1,0 +1,168 @@
+"""值与 JSON 值之间编解码的测试：操作的请求与响应、Result / Maybe 的值都经过它。"""
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Annotated, Any, Literal
+
+import pytest
+
+from xihan_framework import _json
+from xihan_framework._codec import DecodeError, compile_decoder, encode, json_field
+from xihan_framework.primitives import (
+    Error,
+    JsonValue,
+    LifecycleState,
+    Maybe,
+    Result,
+    Stability,
+    TypedId,
+    Unit,
+)
+
+
+class Color(Enum):
+    RED = "red"
+    BLUE = "blue"
+
+
+class Level(Enum):
+    LOW = 1
+    HIGH = 2
+
+
+class SkuId(TypedId[str]):
+    __slots__ = ()
+
+
+@dataclass(frozen=True)
+class Line:
+    sku: SkuId
+    quantity: int
+    unit_price: float = field(default=0.0, metadata=json_field("unitPrice"))
+
+
+@dataclass(frozen=True)
+class Order:
+    lines: tuple[Line, ...]
+    color: Color
+    stability: Stability
+    note: str | None = field(default=None, metadata=json_field(omit_none=True))
+    tags: dict[str, int] = field(default_factory=dict)
+    coupon: Maybe[str] = field(default_factory=Maybe.none)
+    _cache: int = 0
+
+
+@dataclass(frozen=True)
+class Node:
+    name: str
+    children: list["Node"] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Positive:
+    value: int
+
+    def __post_init__(self) -> None:
+        if self.value <= 0:
+            raise ValueError("the value must be positive")
+
+
+def decode(target: object, value: JsonValue) -> object:
+    """编译并解码。"""
+    return compile_decoder(target)(value)
+
+
+def test_dataclasses_round_trip_with_renamed_members() -> None:
+    order = Order(
+        lines=(Line(SkuId("s1"), 2, 9.5),), color=Color.RED, stability=Stability.PREVIEW, tags={"b": 2, "a": 1}
+    )
+    encoded = encode(order)
+    assert _json.dumps(encoded) == (
+        '{"lines":[{"sku":"s1","quantity":2,"unitPrice":9.5}],"color":"red","stability":"preview",'
+        '"tags":{"a":1,"b":2},"coupon":null}'
+    )
+    assert decode(Order, encoded) == order
+    with_note = decode(Order, {"lines": [], "color": "blue", "stability": "stable", "note": "n", "coupon": "c"})
+    assert with_note == Order(lines=(), color=Color.BLUE, stability=Stability.STABLE, note="n", coupon=Maybe.some("c"))
+
+
+def test_decoding_reports_only_the_json_path() -> None:
+    cases: list[tuple[JsonValue, str]] = [
+        ([1], "$"),
+        ({"color": "red", "stability": "stable"}, "$.lines"),
+        ({"lines": [{"sku": "s1", "quantity": "2"}], "color": "red", "stability": "stable"}, "$.lines[0].quantity"),
+        ({"lines": [{"sku": "s1", "quantity": 1.0}], "color": "red", "stability": "stable"}, "$.lines[0].quantity"),
+        ({"lines": [], "color": "green", "stability": "stable"}, "$.color"),
+        ({"lines": [], "color": "red", "stability": "solid"}, "$.stability"),
+        ({"lines": [], "color": "red", "stability": "stable", "tags": {"a.b": True}}, "$.tags['a.b']"),
+    ]
+    for value, path in cases:
+        with pytest.raises(DecodeError) as raised:
+            decode(Order, value)
+        assert raised.value.path == path, value
+
+
+def test_scalars_are_strict() -> None:
+    assert decode(int, 3) == 3
+    assert decode(float, 3) == 3.0
+    for target, value in [(int, True), (int, 1.5), (float, False), (str, 1), (bool, 0), (type(None), 0)]:
+        with pytest.raises(DecodeError):
+            decode(target, value)
+    assert decode(int | None, None) is None
+    assert decode(Literal["a", 1], 1) == 1
+    with pytest.raises(DecodeError):
+        decode(Literal[1], True)
+    assert decode(Level, 2) is Level.HIGH
+    with pytest.raises(DecodeError):
+        decode(Level, "2")
+    assert decode(Annotated[int, "meta"], 5) == 5
+    assert decode(Any, {"x": [1]}) == {"x": [1]}
+    assert decode(JsonValue, [None]) == [None]
+    assert decode(tuple[int, str], [1, "a"]) == (1, "a")
+    with pytest.raises(DecodeError):
+        decode(tuple[int, str], [1])
+
+
+def test_sdk_primitives_decode_from_their_wire_form() -> None:
+    assert decode(SkuId, "s1") == SkuId("s1")
+    assert decode(LifecycleState, "Ready") is LifecycleState.READY
+    assert decode(Maybe[int], None) == Maybe.none()
+    assert decode(Result[int], {"ok": True, "value": 4}) == Result.from_json_value(
+        {"ok": True, "value": 4}, lambda v: v
+    )
+    failed = decode(Result[int], {"ok": False, "error": {"code": "ORDERS_CONFLICT_001", "message": "stale"}})
+    assert isinstance(failed, Result)
+    assert failed.error == Error.literal("ORDERS_CONFLICT_001", "stale")
+    with pytest.raises(DecodeError):
+        decode(Result[int], {"ok": False})
+    assert isinstance(decode(Unit, {}), Unit)
+    assert decode(Error, {"code": "ORDERS_CONFLICT_001", "message": "stale"}) == Error.literal(
+        "ORDERS_CONFLICT_001", "stale"
+    )
+
+
+def test_constructor_failures_are_payload_failures() -> None:
+    with pytest.raises(DecodeError) as raised:
+        decode(Positive, {"value": 0})
+    assert raised.value.path == "$"
+    assert "positive" in raised.value.detail
+
+
+def test_self_referencing_dataclasses_decode() -> None:
+    tree = decode(Node, {"name": "a", "children": [{"name": "b", "children": [{"name": "c"}]}]})
+    assert tree == Node("a", [Node("b", [Node("c")])])
+
+
+def test_unsupported_types_fail_when_compiling() -> None:
+    for target in [int | str, dict[int, str], set[int], bytes]:
+        with pytest.raises(TypeError):
+            compile_decoder(target)
+
+
+def test_encoding_rejects_values_without_a_json_form() -> None:
+    with pytest.raises(TypeError):
+        encode({1, 2})
+    with pytest.raises(TypeError):
+        encode({1: "a"})
+    with pytest.raises(ValueError, match="empty"):
+        json_field("")
