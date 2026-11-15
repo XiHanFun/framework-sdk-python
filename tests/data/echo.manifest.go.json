@@ -1,0 +1,64 @@
+{
+  "$schema": "https://spec.xihanfun.com/manifest/v1.json",
+  "id": "xihan.samples.echo",
+  "package": "EchoPlugin",
+  "version": "5.0.0-preview.1",
+  "primitives": "1",
+  "stability": "experimental",
+  "kind": "plugin",
+  "isolation": "out-of-process",
+  "provides": [
+    {
+      "id": "samples.echo",
+      "version": "3"
+    }
+  ],
+  "requires": [
+    {
+      "id": "kernel.plugins",
+      "version": "1"
+    },
+    {
+      "id": "caching.distributed",
+      "version": "2",
+      "optional": true
+    }
+  ],
+  "bindings": [
+    {
+      "name": "db",
+      "type": "connection:relational",
+      "required": false
+    },
+    {
+      "name": "cache",
+      "type": "cache:distributed"
+    }
+  ],
+  "contributes": {
+    "operations": [
+      "echoes.create",
+      "echoes.relay",
+      "echoes.crash",
+      "events.list"
+    ],
+    "config": {
+      "section": "XiHan:Echo",
+      "schema": "a\u003cb\u003e\u0026c"
+    },
+    "permissions": [
+      "echo.read"
+    ],
+    "health": [
+      "echo"
+    ]
+  },
+  "activation": [
+    "onStartup",
+    "onEvent:orders.*"
+  ],
+  "permissions": [
+    "capability:kernel.pipeline"
+  ],
+  "entry": "EchoPlugin"
+}
