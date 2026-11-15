@@ -15,8 +15,8 @@ type JsonValue = bool | int | float | str | Sequence[JsonValue] | Mapping[str, J
 """JSON 可表示的值：``null``、布尔、整数、浮点、字符串、数组与键为字符串的对象。"""
 
 # 只出现在字符串里的字符：结构字符不含它们，所以可以在整段文本上替换
-_HTML_ESCAPES = {"<": "\\u003c", ">": "\\u003e", "&": "\\u0026", " ": "\\u2028", " ": "\\u2029"}
-_HTML_PATTERN = re.compile("[<>&  ]")
+_HTML_ESCAPES = {"<": "\\u003c", ">": "\\u003e", "&": "\\u0026", "\u2028": "\\u2028", "\u2029": "\\u2029"}
+_HTML_PATTERN = re.compile("[<>&\u2028\u2029]")
 # Python 字符串里成对的代理项已合成一个码点，剩下的代理项都是孤立的；Go 把无效 UTF-8 写成 �
 _SURROGATE_PATTERN = re.compile("[\ud800-\udfff]")
 

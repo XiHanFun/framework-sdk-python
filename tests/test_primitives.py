@@ -355,7 +355,7 @@ def test_json_is_written_like_go_encoding_json() -> None:
     assert _json.dumps(numbers) == (
         "[2,0.1,100000000000000000000,1e+21,0.000001,1e-7,1.5e-10,123456789,-0,3.14159,5e-324,1.7976931348623157e+308]"
     )
-    assert _json.dumps("<a&b> \n\t\x01") == '"\\u003ca\\u0026b\\u003e\\u2028\\n\\t\\u0001"'
+    assert _json.dumps("<a&b>\u2028\n\t\x01") == '"\\u003ca\\u0026b\\u003e\\u2028\\n\\t\\u0001"'
     assert _json.dumps("\ud800") == '"\\ufffd"'
     assert _json.dumps({"b": [], "a": {}}, indent=True) == '{\n  "b": [],\n  "a": {}\n}'
     assert _json.dumps(ok([_Line("x", 2.0)]).to_json_value()) == '{"ok":true,"value":[{"sku":"x","price":2}]}'
