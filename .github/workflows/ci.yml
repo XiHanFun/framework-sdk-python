@@ -1,0 +1,80 @@
+name: CI
+
+# Python SDK 的门禁：格式与静态检查、strict 类型检查、全部测试（读取 spec/ 子模块里的一致性向量），以及分发包的内容。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: 检查与测试（${{ matrix.os }}，Python ${{ matrix.python }}）
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: 检出（含规范 submodule）
+        uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: 安装 Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: 安装包与开发依赖
+        # --group 需要 pip 25.1 以上
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . --group dev
+
+      - name: 格式与静态检查
+        run: |
+          ruff check
+          ruff format --check
+
+      - name: 类型检查
+        run: mypy
+
+      - name: 测试
+        run: pytest
+
+  package:
+    name: 分发包
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出（含规范 submodule）
+        uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: 安装 Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: 构建 sdist 与 wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: spec/ 与 tests/ 不进分发包，py.typed 在 wheel 里
+        # 用 if 判定而不是 ! 取反：bash 的 errexit 不因取反的命令失败而退出
+        shell: bash
+        run: |
+          if tar -tzf dist/*.tar.gz | grep -E '/(spec|tests)/'; then echo "spec/ or tests/ leaked into the sdist"; exit 1; fi
+          if python -m zipfile -l dist/*.whl | grep -E '(^| )(spec|tests)/'; then echo "spec/ or tests/ leaked into the wheel"; exit 1; fi
+          python -m zipfile -l dist/*.whl | grep -q 'xihan_framework/py.typed'
