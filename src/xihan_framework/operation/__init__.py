@@ -1,0 +1,67 @@
+"""操作契约与 XGI 消息（RFC-0011）：业务以操作为单位声明，调用器让它经过完整管道并在 ``handle`` 阶段执行。
+
+请求与响应是普通的 dataclass（或其他可解码的类型，见 ``Registry.add``），用标准库按 JSON 编解码，JSON 是 XGI 的规范编码；
+成员名可用 ``json_field`` 改写。处理器与调用器都是 ``async``。
+"""
+
+from xihan_framework._codec import json_field
+from xihan_framework.operation._operation import (
+    CAPACITY,
+    ERROR_CODE_DUPLICATE,
+    ERROR_CODE_INVALID_PAYLOAD,
+    ERROR_CODE_NOT_FOUND,
+    ERROR_CODE_REGISTRY_FULL,
+    ERROR_CODE_TYPE_MISMATCH,
+    ERROR_CODE_UNEXPECTED,
+    EXPOSE_COMMAND_LINE,
+    EXPOSE_GRPC,
+    EXPOSE_HTTP,
+    EXPOSE_MCP,
+    MESSAGE_INVALID_PAYLOAD,
+    MESSAGE_NO_RESPONSE,
+    MESSAGE_NOT_FOUND,
+    MESSAGE_TYPE_MISMATCH,
+    Contract,
+    Descriptor,
+    Handler,
+    Invoker,
+    Registry,
+    Request,
+    Response,
+    Schema,
+    current,
+    is_id,
+    request_of,
+    response_payload_of,
+)
+
+__all__ = [
+    "CAPACITY",
+    "ERROR_CODE_DUPLICATE",
+    "ERROR_CODE_INVALID_PAYLOAD",
+    "ERROR_CODE_NOT_FOUND",
+    "ERROR_CODE_REGISTRY_FULL",
+    "ERROR_CODE_TYPE_MISMATCH",
+    "ERROR_CODE_UNEXPECTED",
+    "EXPOSE_COMMAND_LINE",
+    "EXPOSE_GRPC",
+    "EXPOSE_HTTP",
+    "EXPOSE_MCP",
+    "MESSAGE_INVALID_PAYLOAD",
+    "MESSAGE_NOT_FOUND",
+    "MESSAGE_NO_RESPONSE",
+    "MESSAGE_TYPE_MISMATCH",
+    "Contract",
+    "Descriptor",
+    "Handler",
+    "Invoker",
+    "Registry",
+    "Request",
+    "Response",
+    "Schema",
+    "current",
+    "is_id",
+    "json_field",
+    "request_of",
+    "response_payload_of",
+]
