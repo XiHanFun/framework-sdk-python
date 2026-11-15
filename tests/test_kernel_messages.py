@@ -80,7 +80,9 @@ def produced_errors() -> list[Error]:
 def test_built_in_templates_match_the_vector(vector: VectorLoader) -> None:
     messages = vector("primitives", "kernel-messages")["messages"]
     templates = BUILT_IN_CATALOG.locales[primitives.DEFAULT_LOCALE]
-    assert set(templates) == {message["key"] for message in messages}
+    # 向量之外只多一个键：RFC-0011 规则 5 要 SDK 翻译未处理的异常，向量还没有列出它的键，模板取自 .NET 的 en-US.json
+    assert set(templates) - {operation.MESSAGE_UNHANDLED_EXCEPTION} == {message["key"] for message in messages}
+    assert templates[operation.MESSAGE_UNHANDLED_EXCEPTION] == "An unhandled exception occurred during the invocation."
     for message in messages:
         assert templates[message["key"]] == message["template"], message["key"]
         assert primitives.placeholders(message["template"]) == message["arguments"], message["key"]

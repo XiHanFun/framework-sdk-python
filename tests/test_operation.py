@@ -301,3 +301,38 @@ def test_contracts_schemas_and_types_are_checked_when_registering() -> None:
 
     with pytest.raises(TypeError):
         Registry().add(Contract("sets.create"), handle, request_type=set, response_type=Empty)
+
+
+def test_unhandled_exceptions_become_unexpected_errors(caplog: pytest.LogCaptureFixture) -> None:
+    # RFC-0011 规则 5：操作或中间件抛出的异常翻译为 KERNEL_UNEXPECTED_001，上线的错误不带异常文本
+    registry = Registry()
+
+    async def explode(ctx: Context, request: Empty) -> Result[Empty]:
+        raise LookupError("secret detail")
+
+    async def misconfigured(ctx: Context, request: Empty) -> Result[Empty]:
+        raise FrameworkError("KERNEL_PIPELINE_001", "the ordering constraints form a cycle")
+
+    registry.add(Contract("bombs.explode"), explode, request_type=Empty, response_type=Empty)
+    registry.add(Contract("bombs.misconfigure"), misconfigured, request_type=Empty, response_type=Empty)
+    invoker = Invoker(registry)
+    error = error_of(invoke(invoker, Request("bombs.explode")))
+    assert error.code == operation.ERROR_CODE_UNEXPECTED
+    assert error.message_key == operation.MESSAGE_UNHANDLED_EXCEPTION
+    assert error.message == "An unhandled exception occurred during the invocation."
+    assert error.inner is None
+    assert "secret detail" not in error.to_json()
+    assert any("bombs.explode" in record.getMessage() and record.exc_info for record in caplog.records)
+    wrapped = error_of(invoke(invoker, Request("bombs.misconfigure")))
+    assert wrapped.inner == Error.literal("KERNEL_PIPELINE_001", "the ordering constraints form a cycle")
+    typed = asyncio.run(invoker.invoke_typed(Context(), "bombs.explode", Empty(), Empty))
+    assert typed.error is not None
+    assert typed.error.code == operation.ERROR_CODE_UNEXPECTED
+
+    async def explode_in_middleware(ctx: Context, next_step: Step) -> Result[Unit]:
+        raise RuntimeError("boom")
+
+    guarded = Invoker(
+        registry, Builder().use_at(pipeline.func("Explode", explode_in_middleware), PipelineStage.OBSERVE)
+    )
+    assert error_of(invoke(guarded, Request("bombs.explode"))).message_key == operation.MESSAGE_UNHANDLED_EXCEPTION

@@ -19,6 +19,8 @@ BUILT_IN_CATALOG: Final = Catalog(
             "kernel.invocation.deadline_exceeded": "The invocation exceeded its deadline.",
             "kernel.invocation.deadline_before_start": "The invocation exceeded its deadline before it started.",
             "kernel.invocation.cancelled": "The invocation was canceled.",
+            # 规范向量还没有列出这个键（RFC-0011 规则 5 要求 SDK 翻译未处理的异常）；模板取自 .NET 的 en-US.json
+            "kernel.invocation.unhandled_exception": "An unhandled exception occurred during the invocation.",
             "kernel.operation.unknown": "Operation '{id}' is not registered.",
             "kernel.operation.invalid_payload": "The payload of operation '{id}' is not valid: {reason}",
             "kernel.operation.type_mismatch": "Operation '{id}' handles '{expected}', but '{actual}' was supplied.",

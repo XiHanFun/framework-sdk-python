@@ -1,5 +1,6 @@
 """操作契约与 XGI 消息（RFC-0011）。"""
 
+import logging
 import re
 import threading
 from collections.abc import Callable, Coroutine
@@ -42,6 +43,8 @@ MESSAGE_INVALID_PAYLOAD: Final = "kernel.operation.invalid_payload"
 MESSAGE_TYPE_MISMATCH: Final = "kernel.operation.type_mismatch"
 #: 管道成功结束却没有执行操作的消息键（参数 ``id``）。
 MESSAGE_NO_RESPONSE: Final = "kernel.operation.no_response"
+#: 调用期间发生未处理异常的消息键（码 ``KERNEL_UNEXPECTED_001``，没有参数）。
+MESSAGE_UNHANDLED_EXCEPTION: Final = "kernel.invocation.unhandled_exception"
 #: 操作 ID 重复登记的消息键（参数 ``id``、``owner``）。
 MESSAGE_DUPLICATE: Final = "kernel.operation.duplicate"
 #: 操作登记表已满的消息键（参数 ``capacity``）。
@@ -288,6 +291,8 @@ class Registry:
             return len(self._descriptors)
 
 
+_logger = logging.getLogger("xihan_framework.operation")
+
 # 上下文对象袋里的键；只在本模块里写入
 _DESCRIPTOR: Final = ItemKey[Descriptor]("xihan.operation.descriptor")
 _REQUEST: Final = ItemKey[Request]("xihan.operation.request")
@@ -342,7 +347,7 @@ class Invoker:
         # 同一个上下文上先后的调用共享对象袋：清掉上一次的响应与类型化终点，免得短路的调用读到旧值
         ctx.set_item(_RESPONSE, None)
         ctx.set_item(_TERMINAL, None)
-        outcome = await ctx.run(self._step(ctx))
+        outcome = await self._run(ctx, request.id)
         if outcome.is_failed:
             return Response(outcome)
         payload = ctx.find_item(_RESPONSE)
@@ -387,7 +392,7 @@ class Invoker:
         ctx.set_item(_RESPONSE, None)
         ctx.set_item(_TERMINAL, terminal)
         try:
-            outcome = await ctx.run(self._step(ctx))
+            outcome = await self._run(ctx, id)
         finally:
             ctx.set_item(_TERMINAL, None)
         if outcome.error is not None:
@@ -395,6 +400,19 @@ class Invoker:
         if not results:
             return fail(_no_response(id))
         return results[0]
+
+    async def _run(self, ctx: Context, id: str) -> Result[Unit]:
+        """在上下文的截止时间与取消信号下执行管道；未处理的异常翻译为 ``KERNEL_UNEXPECTED_001``（RFC-0011 规则 5）。
+
+        ``Exception`` 之外的 ``BaseException``（含 ``CancelledError``）照常传播；完整异常经 ``logging`` 记下，上线的
+        错误不带异常文本，``FrameworkError`` 以 ``to_error()`` 作内部错误，与 .NET 的 Observe 阶段一致。
+        """
+        try:
+            return await ctx.run(self._step(ctx))
+        except Exception as exception:
+            _logger.error("The operation '%s' raised an unhandled exception.", id, exc_info=exception)
+            inner = exception.to_error() if isinstance(exception, FrameworkError) else None
+            return fail(Error.unexpected(ERROR_CODE_UNEXPECTED, MESSAGE_UNHANDLED_EXCEPTION, None, inner))
 
 
 async def _dispatch(ctx: Context) -> Result[Unit]:
