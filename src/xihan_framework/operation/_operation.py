@@ -330,7 +330,10 @@ class Invoker:
         return self._registry
 
     async def invoke(self, ctx: Context, request: Request) -> Response:
-        """执行一个 XGI 请求：未登记返回 ``KERNEL_NOTFOUND_001``（不进管道）；否则经完整管道执行。"""
+        """执行一个 XGI 请求：未登记返回 ``KERNEL_NOTFOUND_001``（不进管道）；否则经完整管道执行。
+
+        管道成功结束而没有执行操作（中间件短路成功）时返回 ``KERNEL_UNEXPECTED_001`` + ``kernel.operation.no_response``。
+        """
         descriptor = self._registry.find(request.id)
         if descriptor is None:
             return Response(fail(_not_found(request.id)))
@@ -342,7 +345,11 @@ class Invoker:
         outcome = await ctx.run(self._step(ctx))
         if outcome.is_failed:
             return Response(outcome)
-        return Response(outcome, ctx.find_item(_RESPONSE))
+        payload = ctx.find_item(_RESPONSE)
+        if payload is None:
+            # 管道成功结束却没有响应：某个中间件以成功短路、handle 没有执行（RFC-0011 规则 9），不返回成功的空载荷
+            return Response(fail(_no_response(request.id)))
+        return Response(outcome, payload)
 
     async def invoke_typed[Req, Res](
         self, ctx: Context, id: str, request: Req, response_type: type[Res]
@@ -386,7 +393,7 @@ class Invoker:
         if outcome.error is not None:
             return fail(outcome.error)
         if not results:
-            return fail(Error.unexpected(ERROR_CODE_UNEXPECTED, MESSAGE_NO_RESPONSE, {"id": id}))
+            return fail(_no_response(id))
         return results[0]
 
 
@@ -403,6 +410,11 @@ async def _dispatch(ctx: Context) -> Result[Unit]:
     if response.outcome.is_ok:
         ctx.set_item(_RESPONSE, response.payload)
     return response.outcome
+
+
+def _no_response(id: str) -> Error:
+    """管道以成功结束而没有响应的错误（RFC-0011 规则 9）。"""
+    return Error.unexpected(ERROR_CODE_UNEXPECTED, MESSAGE_NO_RESPONSE, {"id": id})
 
 
 def _not_found(id: str) -> Error:

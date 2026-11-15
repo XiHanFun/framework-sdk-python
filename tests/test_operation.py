@@ -235,8 +235,11 @@ def test_typed_invocations_that_never_reach_the_handler_fail() -> None:
     assert result.error is not None
     assert result.error.code == operation.ERROR_CODE_UNEXPECTED
     assert result.error.message_key == operation.MESSAGE_NO_RESPONSE
+    # XGI 入口同样报 no_response，不返回成功的空载荷（RFC-0011 规则 9）
     response = invoke(invoker, Request("orders.create", b'{"quantity":1}'))
-    assert response.outcome.is_ok
+    assert error_of(response).code == operation.ERROR_CODE_UNEXPECTED
+    assert error_of(response).message_key == operation.MESSAGE_NO_RESPONSE
+    assert error_of(response).details == {"id": "orders.create"}
     assert response.payload is None
 
 
