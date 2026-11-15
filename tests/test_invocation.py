@@ -2,7 +2,9 @@
 
 import asyncio
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -19,6 +21,7 @@ from xihan_framework.invocation import (
 )
 from xihan_framework.primitives import (
     BAGGAGE_CORRELATION,
+    BAGGAGE_IDEMPOTENCY_KEY,
     BAGGAGE_TENANT,
     ERROR_CODE_INVALID_ARGUMENT,
     UNIT,
@@ -298,3 +301,18 @@ def test_cancellation_converted_to_another_exception_keeps_the_count_balanced() 
         return current.cancelling()
 
     assert asyncio.run(main()) == 0
+
+
+def test_contexts_drop_unacceptable_baggage_values(vector: Callable[[str, str], Any]) -> None:
+    values = vector("primitives", "baggage-keys")["values"]
+    for value in values["acceptable"]:
+        assert Context(baggage={BAGGAGE_TENANT: value}).tenant == value
+        assert Context().with_baggage(BAGGAGE_CORRELATION, value).correlation == value
+    for value in values["unacceptable"]:
+        ctx = Context(baggage={BAGGAGE_TENANT: value, BAGGAGE_IDEMPOTENCY_KEY: value, "xihan.note": value})
+        assert ctx.tenant is None, value
+        # 幂等键不按这条丢弃，交给 Idempotency 阶段拒绝；未登记的键不出进程，也不受约束
+        assert ctx.idempotency_key == value
+        assert ctx.baggage["xihan.note"] == value
+        derived = Context(baggage={BAGGAGE_CORRELATION: "c1"}).with_baggage(BAGGAGE_CORRELATION, value)
+        assert derived.correlation == "c1", value

@@ -480,3 +480,14 @@ def test_catalogs_resolve_strictly_and_fall_back_to_the_description() -> None:
     long_key = "a." + "b" * (primitives.MAX_MESSAGE_KEY_LENGTH - 2)
     assert primitives.is_message_key(long_key)
     assert not primitives.is_message_key(long_key + "b")
+
+
+def test_baggage_values_follow_the_vectors(vector: VectorLoader) -> None:
+    values = vector("primitives", "baggage-keys")["values"]
+    for value in values["acceptable"]:
+        assert primitives.is_baggage_value_acceptable(value), value
+    for value in values["unacceptable"]:
+        assert not primitives.is_baggage_value_acceptable(value), value
+    # 长度按 UTF-16 码元计：基本多文种平面以外的字符算两个，按码点计会把 255 个 a 加一个表情算成 256
+    assert primitives.is_baggage_value_acceptable("a" * 254 + "\U0001f600")
+    assert not primitives.is_baggage_value_acceptable("a" * 255 + "\U0001f600")

@@ -23,6 +23,7 @@ from xihan_framework.primitives import (
     fail,
     is_baggage_key_registered,
     is_baggage_key_well_formed,
+    is_baggage_value_acceptable,
 )
 
 #: 调用超过截止时间。
@@ -248,7 +249,8 @@ class Context:
         ``cancellation`` 省略时创建新的信号（经 ``cancellation`` 属性取得）；``deadline`` 是带时区的绝对时刻，
         ``timeout`` 是相对现在的时长（秒或 ``timedelta``），二者至多给一个。``trace_parent`` 是外部输入，
         不合法时忽略；``trace_id`` / ``span_id`` 是调用方给的值，不合法即编程错误。没有追踪时生成新的 Trace ID
-        与 Span ID，采样标志缺省为真。Baggage 的键必须符合 ``xihan.<name>``。
+        与 Span ID，采样标志缺省为真。Baggage 的键必须符合 ``xihan.<name>``；已登记键的值不合约束的成员丢弃
+        （``xihan.idempotency-key`` 除外，见 ``is_baggage_value_acceptable``）。
         """
         if deadline is not None and timeout is not None:
             raise FrameworkError(ERROR_CODE_INVALID_ARGUMENT, "A context takes either a deadline or a timeout.")
@@ -277,7 +279,8 @@ class Context:
         copied: dict[str, str] = {}
         for key, value in (baggage or {}).items():
             _check_baggage_key(key)
-            copied[key] = value
+            if _admits(key, value):
+                copied[key] = value
         self._cancellation = Cancellation() if cancellation is None else cancellation
         self._deadline = deadline
         self._trace_id = new_trace_id() if trace_id is None else trace_id
@@ -362,8 +365,14 @@ class Context:
         return self._baggage.get(BAGGAGE_LOCALE)
 
     def with_baggage(self, key: str, value: str) -> Self:
-        """派生一个多一个 Baggage 键值的上下文；键必须符合 ``xihan.<name>``。"""
+        """派生一个多一个 Baggage 键值的上下文；键必须符合 ``xihan.<name>``。
+
+        已登记键的值不合约束（见 ``is_baggage_value_acceptable``）时丢弃这一成员，派生的上下文保留原来的 Baggage；
+        ``xihan.idempotency-key`` 例外，原样带上。
+        """
         _check_baggage_key(key)
+        if not _admits(key, value):
+            return self._derive(dict(self._baggage))
         return self._derive({**self._baggage, key: value})
 
     def without_unregistered_baggage(self) -> Self:
@@ -471,6 +480,13 @@ class Context:
         derived._baggage = MappingProxyType(baggage)
         derived._items = self._items
         return derived
+
+
+def _admits(key: str, value: str) -> bool:
+    """Baggage 成员能否进入上下文：已登记键的值要合约束，幂等键与未登记的键不按这条丢弃（conventions/baggage-keys.md）。"""
+    if not is_baggage_key_registered(key) or key == BAGGAGE_IDEMPOTENCY_KEY:
+        return True
+    return is_baggage_value_acceptable(value)
 
 
 def _check_baggage_key(key: str) -> None:

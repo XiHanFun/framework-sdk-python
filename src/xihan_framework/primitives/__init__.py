@@ -11,9 +11,11 @@ from xihan_framework.primitives._baggage import (
     BAGGAGE_LOCALE,
     BAGGAGE_PRINCIPAL,
     BAGGAGE_TENANT,
+    MAX_BAGGAGE_VALUE_LENGTH,
     REGISTERED_BAGGAGE_KEYS,
     is_baggage_key_registered,
     is_baggage_key_well_formed,
+    is_baggage_value_acceptable,
 )
 from xihan_framework.primitives._error import Error
 from xihan_framework.primitives._error_code import (
@@ -85,6 +87,7 @@ __all__ = [
     "KIND_UNAVAILABLE",
     "KIND_UNEXPECTED",
     "KIND_VALIDATION",
+    "MAX_BAGGAGE_VALUE_LENGTH",
     "MAX_MESSAGE_KEY_LENGTH",
     "MESSAGE_UNINITIALIZED_RESULT",
     "NAME",
@@ -115,6 +118,7 @@ __all__ = [
     "format_message",
     "is_baggage_key_registered",
     "is_baggage_key_well_formed",
+    "is_baggage_value_acceptable",
     "is_error_code",
     "is_message_key",
     "message_key_domain",
