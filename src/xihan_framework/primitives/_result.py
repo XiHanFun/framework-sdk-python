@@ -1,12 +1,15 @@
 """成功或失败（RFC-0001 Result / Result<T>）。"""
 
 from collections.abc import Callable, Mapping
-from typing import ClassVar, Final, Never, final
+from typing import TYPE_CHECKING, ClassVar, Final, Never, final
 
 from xihan_framework._json import JsonValue, dumps, loads
 from xihan_framework.primitives._error import Error
 from xihan_framework.primitives._error_code import ERROR_CODE_INVALID_ARGUMENT
 from xihan_framework.primitives._framework import FrameworkError
+
+if TYPE_CHECKING:
+    from xihan_framework.primitives._maybe import Maybe
 
 # 只有本模块的工厂持有它：Result 不能被直接构造，也就没有“未初始化”的结果
 _FACTORY: Final = object()
@@ -14,7 +17,10 @@ _FACTORY: Final = object()
 
 @final
 class Unit:
-    """没有值的成功结果的值：只有一个实例 ``UNIT``，线上编码为 ``{}``（与 Go 的 ``Unit struct{}`` 一致）。"""
+    """没有值的成功结果的值：只有一个实例 ``UNIT``。
+
+    作为结果的值时不上线（无值成功写成 ``{"ok":true}``）；单独出现在别的值里（如操作的空响应）时编码为 ``{}``。
+    """
 
     __slots__ = ()
     _instance: ClassVar["Unit | None"] = None
@@ -112,12 +118,15 @@ class Result[T]:
         return next_step(self._value)
 
     def to_json_value(self, encode_value: Callable[[T], JsonValue] | None = None) -> JsonValue:
-        """线上编码（RFC-0001）：``{"ok": true, "value": …}`` 或 ``{"ok": false, "error": …}``。
+        """线上编码（RFC-0001「Result」）：``{"ok": true, "value": …}``、无值成功 ``{"ok": true}`` 或 ``{"ok": false, "error": …}``。
 
-        ``encode_value`` 把成功值编码成 JSON 值；省略时按 SDK 的默认规则编码（dataclass、映射、序列与原语）。
+        值是 ``UNIT`` 的成功不写 ``value``；值是 ``Maybe`` 时无值写 ``null``。``encode_value`` 把成功值编码成 JSON 值，
+        省略时按 SDK 的默认规则编码（dataclass、映射、序列与原语）。
         """
         if self._error is not None:
             return {"ok": False, "error": self._error.to_json_value()}
+        if self._value is UNIT:
+            return {"ok": True}
         if encode_value is None:
             from xihan_framework._codec import encode
 
@@ -131,30 +140,56 @@ class Result[T]:
 
     @staticmethod
     def from_json_value[U](value: JsonValue, decode_value: Callable[[JsonValue], U]) -> "Result[U]":
-        """从线上编码还原；形状不对抛出 ``FrameworkError``（``PRIMITIVES_VALIDATION_001``）。
+        """从有值结果的线上编码还原；不合 RFC-0001「Result」的规则抛出 ``FrameworkError``（``PRIMITIVES_VALIDATION_001``）。
 
-        ``decode_value`` 把成功的 ``value`` 解码成值；没有 ``value`` 时它收到 ``None``。
+        成功必须带 ``value`` 且不是 ``null``，交给 ``decode_value`` 解码；失败必须带 ``error``、不带 ``value``；
+        成功不能带 ``error``；未知成员忽略。
         """
-        if not isinstance(value, Mapping):
-            raise FrameworkError(ERROR_CODE_INVALID_ARGUMENT, "A result on the wire must be a JSON object.")
-        succeeded = value.get("ok")
-        if not isinstance(succeeded, bool):
-            raise FrameworkError(ERROR_CODE_INVALID_ARGUMENT, "A result on the wire needs a boolean 'ok'.")
-        if succeeded:
-            return ok(decode_value(value.get("value")))
-        error = value.get("error")
-        if error is None:
-            raise FrameworkError(ERROR_CODE_INVALID_ARGUMENT, "A failed result on the wire needs an error.")
-        return fail(Error.from_json_value(error))
+        members, error = _read(value)
+        if error is not None:
+            return fail(error)
+        if "value" not in members:
+            raise _wire_error("A successful result on the wire needs a 'value'.")
+        if members["value"] is None:
+            raise _wire_error("The value of a successful result on the wire must not be null.")
+        return ok(decode_value(members["value"]))
+
+    @staticmethod
+    def unit_from_json_value(value: JsonValue) -> "Result[Unit]":
+        """从无值结果的线上编码还原：成功只能是 ``{"ok":true}``，带了 ``value``（``{}`` 与 ``null`` 也算）即不合法。"""
+        members, error = _read(value)
+        if error is not None:
+            return fail(error)
+        if "value" in members:
+            raise _wire_error("A successful result without a value must not carry a 'value'.")
+        return success()
+
+    @staticmethod
+    def maybe_from_json_value[U](value: JsonValue, decode_value: Callable[[JsonValue], U]) -> "Result[Maybe[U]]":
+        """从值类型为 ``Maybe`` 的结果的线上编码还原：成功必须带 ``value``，``null`` 即无值，其余交给 ``decode_value``。"""
+        from xihan_framework.primitives._maybe import Maybe
+
+        members, error = _read(value)
+        if error is not None:
+            return fail(error)
+        if "value" not in members:
+            raise _wire_error("A successful result on the wire needs a 'value'.")
+        return ok(Maybe.from_json_value(members["value"], decode_value))
 
     @staticmethod
     def from_json[U](text: str | bytes, decode_value: Callable[[JsonValue], U]) -> "Result[U]":
-        """从线上编码的 JSON 文本还原。"""
-        try:
-            value = loads(text)
-        except ValueError as error:
-            raise FrameworkError(ERROR_CODE_INVALID_ARGUMENT, "The result is not valid JSON.") from error
-        return Result.from_json_value(value, decode_value)
+        """从有值结果的 JSON 文本还原。"""
+        return Result.from_json_value(_parse(text), decode_value)
+
+    @staticmethod
+    def unit_from_json(text: str | bytes) -> "Result[Unit]":
+        """从无值结果的 JSON 文本还原。"""
+        return Result.unit_from_json_value(_parse(text))
+
+    @staticmethod
+    def maybe_from_json[U](text: str | bytes, decode_value: Callable[[JsonValue], U]) -> "Result[Maybe[U]]":
+        """从值类型为 ``Maybe`` 的结果的 JSON 文本还原。"""
+        return Result.maybe_from_json_value(_parse(text), decode_value)
 
     def __repr__(self) -> str:
         """``Ok(值)`` 或 ``Fail(码: 消息)``，便于日志。"""
@@ -190,3 +225,34 @@ def fail(error: Error) -> Result[Never]:
 def success() -> Result[Unit]:
     """创建没有值的成功结果，值是 ``UNIT``。"""
     return Result(_FACTORY, UNIT, None)
+
+
+def _read(value: JsonValue) -> tuple[Mapping[str, JsonValue], Error | None]:
+    """三种结果共用的读取：核对 ``ok``，成功不带 ``error``、失败带 ``error`` 不带 ``value``，失败时还原出错误。"""
+    if not isinstance(value, Mapping):
+        raise _wire_error("A result on the wire must be a JSON object.")
+    succeeded = value.get("ok")
+    if not isinstance(succeeded, bool):
+        raise _wire_error("A result on the wire needs a boolean 'ok'.")
+    if succeeded:
+        if "error" in value:
+            raise _wire_error("A successful result on the wire must not carry an 'error'.")
+        return value, None
+    if "value" in value:
+        raise _wire_error("A failed result on the wire must not carry a 'value'.")
+    if value.get("error") is None:
+        raise _wire_error("A failed result on the wire needs an error.")
+    return value, Error.from_json_value(value["error"])
+
+
+def _parse(text: str | bytes) -> JsonValue:
+    """解析结果的 JSON 文本。"""
+    try:
+        return loads(text)
+    except ValueError as error:
+        raise _wire_error("The result is not valid JSON.") from error
+
+
+def _wire_error(message: str) -> FrameworkError:
+    """线上编码不合法的配置错误（``PRIMITIVES_VALIDATION_001``）。"""
+    return FrameworkError(ERROR_CODE_INVALID_ARGUMENT, message)

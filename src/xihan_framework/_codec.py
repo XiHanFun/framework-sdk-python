@@ -21,7 +21,7 @@ from typing import Annotated, Any, Final, Literal, TypeAliasType, Union, get_arg
 from xihan_framework._json import JsonValue
 from xihan_framework.primitives._id import TypedId
 from xihan_framework.primitives._maybe import Maybe
-from xihan_framework.primitives._result import Result
+from xihan_framework.primitives._result import Result, Unit
 
 #: dataclass 字段元数据里的 JSON 名。
 JSON_NAME: Final = "xihan.json.name"
@@ -267,7 +267,31 @@ def _compile_maybe(element: object, cache: dict[object, Decoder]) -> Decoder:
 
 
 def _compile_result(element: object, cache: dict[object, Decoder]) -> Decoder:
-    """``Result[X]``：线上编码 ``{"ok": …}``。"""
+    """``Result[X]``：线上编码 ``{"ok": …}``，按值类型分三种读法（RFC-0001「Result」）。
+
+    ``Result[Unit]`` 是无值结果，成功不能带 ``value``；``Result[Maybe[X]]`` 的 ``value`` 可以是 ``null``；其余的
+    ``value`` 必填且不能是 ``null``。
+    """
+    if element is Unit:
+
+        def decode_unit(value: JsonValue, path: str) -> object:
+            try:
+                return Result.unit_from_json_value(value)
+            except ValueError as error:
+                raise DecodeError(path, str(error)) from error
+
+        return decode_unit
+    if element is Maybe or get_origin(element) is Maybe:
+        arguments = get_args(element)
+        maybe_inner = _compile(arguments[0] if arguments else Any, cache)
+
+        def decode_maybe(value: JsonValue, path: str) -> object:
+            try:
+                return Result.maybe_from_json_value(value, lambda member: maybe_inner(member, f"{path}.value"))
+            except ValueError as error:
+                raise DecodeError(path, str(error)) from error
+
+        return decode_maybe
     inner = _compile(element, cache)
 
     def decode(value: JsonValue, path: str) -> object:

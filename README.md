@@ -76,7 +76,7 @@ asyncio.run(main())
 3. 处理器与中间件都是 `async def`；`Invoker` 在 `Context.run` 里执行整条管道：截止时间到了取消协程并返回 `KERNEL_TIMEOUT_001`，`ctx.cancellation.cancel()`（可以在任何线程调用）取消协程并返回 `KERNEL_CANCELLED_001`，两者同时触发时报超时；任务被别处取消时 `CancelledError` 照常传播。
 4. 清单：`manifest.read(data)` / `manifest.read_file(path)` 解析并校验（未知字段、类型不符、格式与跨字段约束都抛 `FrameworkError`），`manifest.write(m)` 输出两空格缩进、字段按 Schema 顺序、缺省值省略的规范化 JSON。
 
-`Result`、`Error`、`Maybe` 的 JSON 编码与 .NET 参考实现一致（`{"ok":true,"value":…}` / `{"ok":false,"error":{…}}`），写出与 Go SDK 的 `encoding/json` 逐字节相同（浮点数的写法、`<` `>` `&` 的转义、映射键的排序）；生命周期迁移表、管道阶段顺序、错误码、Baggage 键与能力依赖的文法都由 `spec/conformance/vectors` 验证。
+`Result`、`Error`、`Maybe` 的 JSON 编码按 RFC-0001「Result」：有值成功 `{"ok":true,"value":…}`，无值成功（`success()`）只写 `{"ok":true}`，失败 `{"ok":false,"error":{…}}`。读取分三种：`Result.from_json_value`（有值，`value` 必填且不能是 `null`）、`Result.unit_from_json_value`（无值，带了 `value` 即拒绝，`{}` 与 `null` 也算）、`Result.maybe_from_json_value`（值是 `Maybe`，`null` 即无值）；`Error` 的 `message` 必填且非空，可选成员写成 `null` 不合法，未知成员忽略。写出的字节形式（浮点数的写法、`<` `>` `&` 的转义、映射键的排序）与 Go SDK 的 `encoding/json` 相同；这些规则与生命周期迁移表、管道阶段顺序、错误码、Baggage 键与能力依赖的文法都由 `spec/conformance/vectors` 验证。
 
 ## 开发
 

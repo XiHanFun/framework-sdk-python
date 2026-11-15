@@ -190,7 +190,11 @@ class Error:
 
     @classmethod
     def from_json_value(cls, value: JsonValue) -> "Error":
-        """从线上编码还原；码不合法或形状不对抛出 ``FrameworkError``（``PRIMITIVES_VALIDATION_001``）。"""
+        """从线上编码还原（RFC-0001「Result」的 Error 规则）；不合规则抛出 ``FrameworkError``（``PRIMITIVES_VALIDATION_001``）。
+
+        ``code`` 必填且合文法；``message`` 必填，是非空字符串；``messageKey``、``details``、``inner`` 可选，写了就必须
+        分别是合文法的键、JSON 对象与合法的 Error，写成 ``null`` 不合法；未知成员忽略。
+        """
         if not isinstance(value, Mapping):
             raise _wire_error("An error on the wire must be a JSON object.")
         code = value.get("code")
@@ -199,23 +203,25 @@ class Error:
                 ERROR_CODE_INVALID_ARGUMENT, f"The error code '{code}' must match <DOMAIN>_<KIND>_<NNN>."
             )
         message = value.get("message")
-        message_key = value.get("messageKey")
-        details = value.get("details")
-        inner = value.get("inner")
-        if message is not None and not isinstance(message, str):
-            raise _wire_error("The 'message' of an error on the wire must be a string.")
-        if message_key is not None and (not isinstance(message_key, str) or not is_message_key(message_key)):
-            raise _wire_error(f"The 'messageKey' '{message_key}' of an error on the wire is not a valid message key.")
-        if details is not None and not isinstance(details, Mapping):
-            raise _wire_error("The 'details' of an error on the wire must be a JSON object.")
-        # 空的 message / messageKey 与没有等价，与 Go 的 omitempty 一致
-        return cls._create(
-            code,
-            message_key or None,
-            message or None,
-            _freeze_details(details),
-            None if inner is None else cls.from_json_value(inner),
-        )
+        if not isinstance(message, str) or not message:
+            raise _wire_error("An error on the wire needs a non-empty string 'message'.")
+        message_key: str | None = None
+        if "messageKey" in value:
+            candidate = value["messageKey"]
+            if not isinstance(candidate, str) or not is_message_key(candidate):
+                raise _wire_error(f"The 'messageKey' {candidate!r} of an error on the wire is not a valid message key.")
+            message_key = candidate
+        details: Mapping[str, JsonValue] | None = None
+        if "details" in value:
+            candidate_details = value["details"]
+            if not isinstance(candidate_details, Mapping):
+                raise _wire_error("The 'details' of an error on the wire must be a JSON object.")
+            details = candidate_details
+        inner: Error | None = None
+        if "inner" in value:
+            # 可选成员缺失表示没有；写成 null 不合法，交给递归的对象判定拒绝
+            inner = cls.from_json_value(value["inner"])
+        return cls._create(code, message_key, message, _freeze_details(details), inner)
 
     @classmethod
     def from_json(cls, text: str | bytes) -> "Error":

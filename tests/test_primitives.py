@@ -262,7 +262,7 @@ def test_result_wire_encoding() -> None:
     assert decoded.error is not None
     assert decoded.error.code == "ORDERS_CONFLICT_001"
     assert Result.from_json('{"ok":true,"value":5}', _as_int).value == 5
-    assert success().to_json() == '{"ok":true,"value":{}}'
+    assert success().to_json() == '{"ok":true}'
     assert success().value is UNIT
     with pytest.raises(FrameworkError):
         Result.from_json('{"ok":false}', lambda value: value)
@@ -396,3 +396,50 @@ def test_error_encoding_and_descriptions_match_the_go_sdk_output() -> None:
         "orders.failed (b=true, f=1e+06, g=100000, h=1e-05, i=42, l=[1 a], m=map[a:2 b:1], n=<nil>, s=x)"
     )
     assert primitives.format_message("{0} of {count:%03d} {x:N2}", {"0": "a", "count": 7, "x": 1.5}) == "a of 007 1.5"
+
+
+def _identity(value: JsonValue) -> JsonValue:
+    """把 JSON 值原样当作结果的值。"""
+    return value
+
+
+def _read_result(kind: str, value: JsonValue) -> JsonValue:
+    """按向量的 kind 读取一条结果，再写成 JSON 值。"""
+    if kind == "unit":
+        return Result.unit_from_json_value(value).to_json_value()
+    if kind == "maybe":
+        return Result.maybe_from_json_value(value, _identity).to_json_value()
+    assert kind == "value"
+    return Result.from_json_value(value, _identity).to_json_value()
+
+
+def test_result_encoding_follows_the_wire_vectors(vector: VectorLoader) -> None:
+    results = vector("primitives", "wire-encoding")["results"]
+    for case in results["valid"]:
+        # 再写出时按 JSON 值等于规范形式，不比较成员顺序
+        assert _read_result(case["kind"], case["json"]) == case.get("canonical", case["json"]), case["name"]
+    for case in results["invalid"]:
+        with pytest.raises(FrameworkError) as raised:
+            _read_result(case["kind"], case["json"])
+        assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT, case["name"]
+
+
+def test_error_encoding_follows_the_wire_vectors(vector: VectorLoader) -> None:
+    errors = vector("primitives", "wire-encoding")["errors"]
+    for case in errors["valid"]:
+        decoded = Error.from_json_value(case["json"])
+        assert decoded.to_json_value() == case.get("canonical", case["json"]), case["name"]
+    for case in errors["invalid"]:
+        with pytest.raises(FrameworkError) as raised:
+            Error.from_json_value(case["json"])
+        assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT, case["name"]
+
+
+def test_unit_and_maybe_results_write_their_canonical_form() -> None:
+    assert success().to_json_value() == {"ok": True}
+    assert ok(Maybe.none()).to_json() == '{"ok":true,"value":null}'
+    assert ok(Maybe.some(3)).to_json() == '{"ok":true,"value":3}'
+    assert Result.unit_from_json('{"ok":true}') == success()
+    assert Result.maybe_from_json('{"ok":true,"value":null}', _identity).value == Maybe.none()
+    with pytest.raises(FrameworkError):
+        Result.unit_from_json('{"ok":true,"value":{}}')
