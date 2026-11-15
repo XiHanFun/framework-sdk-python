@@ -4,8 +4,20 @@
 .vscode/
 *.swp
 .DS_Store
+
+# 构建产物
 /dist/
 /build/
 *.egg-info/
+
+# Python
 __pycache__/
+*.py[cod]
 .venv/
+
+# 工具缓存
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
