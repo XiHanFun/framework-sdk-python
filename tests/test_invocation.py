@@ -277,3 +277,24 @@ def test_run_outside_a_task_is_rejected() -> None:
     with pytest.raises(RuntimeError, match="asyncio task"):
         coroutine.send(None)
     coroutine.close()
+
+
+def test_cancellation_converted_to_another_exception_keeps_the_count_balanced() -> None:
+    signal = Cancellation()
+
+    async def convert() -> Result[Unit]:
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            raise LookupError("converted") from None
+        return success()
+
+    async def main() -> int:
+        asyncio.get_running_loop().call_later(0.01, signal.cancel)
+        with pytest.raises(LookupError):
+            await Context(cancellation=signal).run(convert())
+        current = asyncio.current_task()
+        assert current is not None
+        return current.cancelling()
+
+    assert asyncio.run(main()) == 0

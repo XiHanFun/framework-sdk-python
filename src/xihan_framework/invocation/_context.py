@@ -201,11 +201,19 @@ class _Items:
 class _RunState:
     """``Context.run`` 一次执行的状态，只在事件循环线程里读写。"""
 
-    __slots__ = ("finished", "signalled")
+    __slots__ = ("finished", "signalled", "withdrawn")
 
     def __init__(self) -> None:
         self.finished = False
         self.signalled = False
+        self.withdrawn = False
+
+    def withdraw(self, task: "asyncio.Task[Any]") -> int:
+        """撤回本信号发出的取消请求（至多一次），返回任务剩下的取消请求数。"""
+        if not self.signalled or self.withdrawn:
+            return task.cancelling()
+        self.withdrawn = True
+        return task.uncancel()
 
 
 class Context:
@@ -421,7 +429,7 @@ class Context:
             if not state.signalled:
                 raise
             # 撤回本信号发出的取消请求；还有别的请求说明任务也被别处取消了，照常传播
-            if task.uncancel() > 0:
+            if state.withdraw(task) > 0:
                 raise
             # 定时器与信号都触发时 asyncio.timeout 不把取消转成 TimeoutError，这里按定时器归因为超时
             return fail(deadline_exceeded_error() if timeout.expired() else cancelled_error())
@@ -431,9 +439,8 @@ class Context:
             return fail(deadline_exceeded_error())
         finally:
             unsubscribe()
-        if state.signalled:
-            # 协程接住了本信号的取消并正常返回：撤回取消请求，返回它写下的结果
-            task.uncancel()
+            # 协程接住了本信号的取消后正常返回，或把它转成了别的异常：同样撤回取消请求，计数保持平衡
+            state.withdraw(task)
         outcome = result.error
         if timeout.expired() and outcome is not None and outcome.code == ERROR_CODE_CANCELLED:
             return fail(deadline_exceeded_error())
