@@ -146,12 +146,18 @@ class Builder:
         return self._add(middleware, instance, stage, placement, owner)
 
     def before(self, middleware: str, other: str) -> Self:
-        """约束 ``middleware`` 在 ``other`` 之前；都按类型名。"""
+        """约束 ``middleware`` 在 ``other`` 之前。
+
+        两端都是中间件名：按名字登记的实例名，或类型名（该类型只登记了一次时）。约束主体 ``middleware`` 在声明时必须
+        已登记，否则立即抛出 ``KERNEL_PIPELINE_003``；目标 ``other`` 在排序时解析（RFC-0004 排序规则第 7 条）。
+        """
+        self._check_subject(middleware)
         self._constraints.append((middleware, other))
         return self
 
     def after(self, middleware: str, other: str) -> Self:
-        """约束 ``middleware`` 在 ``other`` 之后；都按类型名。"""
+        """约束 ``middleware`` 在 ``other`` 之后；名字的解析与 ``before`` 相同，约束主体 ``middleware`` 在声明时必须已登记。"""
+        self._check_subject(middleware)
         self._constraints.append((other, middleware))
         return self
 
@@ -195,13 +201,10 @@ class Builder:
     def _sorted(self) -> list[_Registration]:
         """按规则排序：先阶段；阶段内先位置，再归属，再登记顺序，最后按约束做稳定拓扑排序。"""
         self._check_duplicates()
-        by_type: dict[str, list[_Registration]] = {}
-        for registration in self._registrations:
-            by_type.setdefault(registration.descriptor.middleware, []).append(registration)
-        # 约束按类型名引用：未注册、有多个实例、跨阶段都是登记错误
+        # 约束按中间件名（实例名或类型名）引用：未登记、一个名字对应多个中间件、跨阶段都是登记错误
         resolved: list[tuple[_Registration, _Registration]] = []
         for first_name, second_name in self._constraints:
-            first, second = _single(by_type, first_name), _single(by_type, second_name)
+            first, second = self._single(first_name), self._single(second_name)
             if first.descriptor.stage is not second.descriptor.stage:
                 raise _registration_error(
                     f"the ordering constraint between '{first_name}' and '{second_name}' crosses stages"
@@ -214,6 +217,32 @@ class Builder:
             members.sort(key=lambda item: (item.descriptor.placement.value, item.descriptor.owner, item.order))
             ordered.extend(_topological_sort(members, resolved))
         return ordered
+
+    def _named(self, name: str) -> list[_Registration]:
+        """名字对应的登记：实例名等于它的命名实例，与类型名等于它的登记。"""
+        return [
+            registration
+            for registration in self._registrations
+            if registration.descriptor.instance == name or registration.descriptor.middleware == name
+        ]
+
+    def _check_subject(self, name: str) -> None:
+        """约束主体在声明时必须已登记（RFC-0004 排序规则第 7 条）；有歧义留到排序时报。"""
+        if not self._named(name):
+            raise _registration_error(f"the ordering constraint references the unregistered middleware '{name}'")
+
+    def _single(self, name: str) -> _Registration:
+        """按名字取唯一的登记；没有、或一个名字对应多个中间件都是登记错误。"""
+        registrations = self._named(name)
+        if not registrations:
+            raise _registration_error(f"the ordering constraint references the unregistered middleware '{name}'")
+        if len(registrations) > 1:
+            if all(registration.descriptor.middleware == name for registration in registrations):
+                raise _registration_error(
+                    f"the middleware '{name}' has several named instances; ordering constraints by type are ambiguous"
+                )
+            raise _registration_error(f"the middleware name '{name}' refers to more than one middleware")
+        return registrations[0]
 
     def _check_duplicates(self) -> None:
         """同一类型的默认实例只登记一次、命名实例的名字在类型内唯一。"""
@@ -242,18 +271,6 @@ def _link(middleware: Middleware, downstream: Step) -> Step:
         return await middleware.invoke(ctx, downstream)
 
     return step
-
-
-def _single(by_type: dict[str, list[_Registration]], name: str) -> _Registration:
-    """按类型名取唯一的登记；没有或有多个实例都是登记错误。"""
-    registrations = by_type.get(name, [])
-    if not registrations:
-        raise _registration_error(f"the ordering constraint references the unregistered middleware '{name}'")
-    if len(registrations) > 1:
-        raise _registration_error(
-            f"the middleware '{name}' has several named instances; ordering constraints by type are ambiguous"
-        )
-    return registrations[0]
 
 
 def _topological_sort(

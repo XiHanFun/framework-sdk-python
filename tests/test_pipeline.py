@@ -225,3 +225,43 @@ def test_middleware_exceptions_propagate() -> None:
     step = Builder().use_at(pipeline.func("Explode", explode), PipelineStage.OBSERVE).build(terminal)
     with pytest.raises(LookupError):
         run(step)
+
+
+def test_constraints_may_name_instances() -> None:
+    # RFC-0004 排序规则第 7 条：有多个实例的类型按实例名约束，两端都可以是实例名或只登记一次的类型名
+    builder = (
+        Builder()
+        .use_named_instance("guard-a", passthrough("Guard"), PipelineStage.OBSERVE, Placement.END, "xihan.plugins.a")
+        .use_named_instance("guard-b", passthrough("Guard"), PipelineStage.OBSERVE, Placement.END, "xihan.plugins.b")
+        .use_at(passthrough("Audit"), PipelineStage.OBSERVE, Placement.END, "app")
+        .before("guard-b", "guard-a")
+        .after("Audit", "guard-b")
+    )
+    assert [descriptor.display for descriptor in builder.describe()] == ["Guard[guard-b]", "Audit", "Guard[guard-a]"]
+    crossing = (
+        Builder()
+        .use_named_instance("guard-a", passthrough("Guard"), PipelineStage.OBSERVE)
+        .use_at(passthrough("Tx"), PipelineStage.TRANSACTION)
+        .before("guard-a", "Tx")
+    )
+    assert_code(crossing, pipeline.ERROR_CODE_REGISTRATION)
+    clash = (
+        Builder()
+        .use_at(passthrough("Audit"), PipelineStage.OBSERVE)
+        .use_named_instance("Audit", passthrough("Guard"), PipelineStage.OBSERVE)
+        .use_at(passthrough("Other"), PipelineStage.OBSERVE)
+        .before("Other", "Audit")
+    )
+    assert "refers to more than one middleware" in assert_code(clash, pipeline.ERROR_CODE_REGISTRATION).message
+
+
+def test_constraint_subjects_must_be_registered_when_declared() -> None:
+    for declare in (Builder.before, Builder.after):
+        with pytest.raises(FrameworkError) as raised:
+            declare(Builder().use_at(passthrough("A"), PipelineStage.VALIDATE), "Missing", "A")
+        assert raised.value.code == pipeline.ERROR_CODE_REGISTRATION
+        assert "'Missing'" in raised.value.message
+    # 目标在排序时才解析：可以先声明约束、后登记目标
+    builder = Builder().use_at(passthrough("A"), PipelineStage.VALIDATE).before("A", "B")
+    builder.use_at(passthrough("B"), PipelineStage.VALIDATE)
+    assert [descriptor.middleware for descriptor in builder.describe()] == ["A", "B"]
