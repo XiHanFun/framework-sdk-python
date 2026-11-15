@@ -3,9 +3,10 @@
 import math
 import re
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from decimal import ROUND_HALF_EVEN, Context, Decimal
 from types import MappingProxyType
-from typing import Final, Protocol
+from typing import Final, NamedTuple, Protocol
 
 from xihan_framework._json import exponent_notation, fixed_notation, shortest_digits
 from xihan_framework.primitives._error_code import ERROR_CODE_INVALID_ARGUMENT
@@ -13,16 +14,31 @@ from xihan_framework.primitives._framework import FrameworkError
 
 #: 默认区域，也是消息目录的回退区域。
 DEFAULT_LOCALE: Final = "en-US"
+#: 消息键的最大长度（RFC-0010「消息键」，与 .NET 的 ``MessageTemplate.MaxKeyLength`` 相同）。
+MAX_MESSAGE_KEY_LENGTH: Final = 128
 
 # 消息键文法 <domain>.<segment>[.<segment>]，首段与后段同形（RFC-0001，2026-10-28 修订后首段可含下划线）
 _MESSAGE_KEY_PATTERN = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+")
-# 模板里的一段：转义的 {{ 与 }}，或占位符 {name} / {0} / {name:format}
-_TEMPLATE_TOKEN = re.compile(r"\{\{|\}\}|\{([A-Za-z_][A-Za-z0-9_]*|[0-9]+)(?::([^{}]*))?\}")
+# 占位符名：字母开头的字母、数字与下划线（按名字），或纯数字（按位置）（RFC-0010「模板」）
+_PLACEHOLDER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]*|[0-9]+")
+# 可移植的格式说明符：D、X / x、F、N，可带精度；字母大小写与 .NET 一样不区分（X / x 决定十六进制的大小写）
+_PORTABLE_SPECIFIER = re.compile(r"([DdXxFfNn])([0-9]{0,9})")
+# 浮点在这个范围内写最短往返的定点形式（RFC-0010「值的文本形式」）
+_PLAIN_FLOAT_MIN: Final = 1e-4
+_PLAIN_FLOAT_MAX: Final = 1e15
+
+
+class _Placeholder(NamedTuple):
+    """模板里的一个占位符；``raw`` 是它在模板里的原文，缺值时原样输出。"""
+
+    name: str
+    specifier: str | None
+    raw: str
 
 
 def is_message_key(key: str) -> bool:
-    """判断消息键是否符合 ``^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$``。"""
-    return _MESSAGE_KEY_PATTERN.fullmatch(key) is not None
+    """判断消息键是否符合 ``^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`` 且不超过 128 个字符。"""
+    return len(key) <= MAX_MESSAGE_KEY_LENGTH and _MESSAGE_KEY_PATTERN.fullmatch(key) is not None
 
 
 def message_key_domain(key: str) -> str | None:
@@ -31,40 +47,30 @@ def message_key_domain(key: str) -> str | None:
 
 
 def placeholders(template: str) -> list[str]:
-    """列出模板里的占位符名，按出现顺序去重；转义的花括号不算。"""
+    """列出模板里的占位符名，按出现顺序去重；转义的花括号与字面量里的花括号不算。"""
     names: list[str] = []
-    for match in _TEMPLATE_TOKEN.finditer(template):
-        name = match.group(1)
-        if name is not None and name not in names:
-            names.append(name)
+    for segment in _segments(template):
+        if isinstance(segment, _Placeholder) and segment.name not in names:
+            names.append(segment.name)
     return names
 
 
 def format_message(template: str, arguments: Mapping[str, object] | None) -> str:
-    """用参数填充模板。
+    """宽松格式化（RFC-0010「模板」）：缺值的占位符连同格式说明符原样留在文本里，让遗漏可见。
 
     ``{name}`` 取命名参数，``{0}`` 取位置参数（键 ``"0"``、``"1"``…，见 ``positional``）；``{{`` 与 ``}}`` 是转义的
-    单个花括号（RFC-0010）；缺参数的占位符原样保留。占位符可带 ``:format``：以 ``%`` 开头的按 printf 风格解释
-    （如 ``{count:%05d}``，常用写法与 Go 的 fmt 动词一致），其他写法按值的默认文本输出。
+    单个花括号；花括号里不是合法名字的与没有闭合的 ``{`` 之后的文本原样输出；参数值里的花括号不再解释。占位符可带
+    可移植的格式说明符 ``D``、``X`` / ``x``、``F``、``N``（按不变文化，``F`` 与 ``N`` 正好一半时取偶），其他说明符
+    按无格式输出。参数存在而值为 ``None`` 不算缺值，写空串。
     """
+    rendered = _render(template, arguments, strict=False)
+    assert rendered is not None
+    return rendered
 
-    def replace(match: re.Match[str]) -> str:
-        token = match.group()
-        if token in ("{{", "}}"):
-            return token[0]
-        name, spec = match.group(1), match.group(2)
-        if arguments is None or name not in arguments:
-            return token
-        value = arguments[name]
-        if spec and spec.startswith("%"):
-            try:
-                return spec % (value,)
-            except (TypeError, ValueError):
-                # 动词与值的类型不符是目录的缺陷；渲染消息不能失败，按默认文本输出，与非 % 写法一样
-                return format_argument(value)
-        return format_argument(value)
 
-    return _TEMPLATE_TOKEN.sub(replace, template)
+def try_format_message(template: str, arguments: Mapping[str, object] | None) -> str | None:
+    """严格格式化：任一占位符缺值即为 ``None``，供解析器拒绝半截译文、退回 ``describe``；其余规则同 ``format_message``。"""
+    return _render(template, arguments, strict=True)
 
 
 def positional(*values: object) -> dict[str, object]:
@@ -73,7 +79,7 @@ def positional(*values: object) -> dict[str, object]:
 
 
 def describe(key: str, arguments: Mapping[str, object] | None) -> str:
-    """没有文案时描述一个消息：``键 (k=v, ...)``，参数按键排序；没有参数时就是键。"""
+    """没有文案时描述一个消息：``键 (k=v, ...)``，值按 ``format_argument`` 的文本形式，参数按名字排序；没有参数时就是键。"""
     if not arguments:
         return key
     parts = ", ".join(f"{name}={format_argument(arguments[name])}" for name in sorted(arguments))
@@ -81,17 +87,18 @@ def describe(key: str, arguments: Mapping[str, object] | None) -> str:
 
 
 def format_argument(value: object) -> str:
-    """把一个参数写成文本，与 Go SDK 的 ``fmt.Sprint`` 逐字一致。
+    """一个参数的文本形式（RFC-0010「值的文本形式」），无格式说明符时与 ``describe`` 用它。
 
-    布尔写 ``true`` / ``false``，``None`` 写 ``<nil>``，浮点数取最短表示（指数小于 -4 或不小于 6 时用
-    ``1e+06`` 形式），数组写 ``[a b]``，对象按键排序写 ``map[k:v]``，其他值用 ``str``。
+    字符串原样，整数十进制，布尔写 ``true`` / ``false``，``None`` 写空串；浮点在 1e-4 ≤ |x| < 1e15 或为 0 时写最短
+    往返的定点形式，整数值不带小数点（``2.0`` 写 ``2``）。范围之外的浮点、数组与对象规范不作规定：浮点写成 .NET 的
+    ``1E+15`` 形式，数组写 ``[a b]``，对象按键排序写 ``map[k:v]``，其他值用 ``str``。
     """
     if value is None:
-        return "<nil>"
+        return ""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, float):
-        return _format_float(value)
+        return _float_text(value)
     if isinstance(value, str):
         return value
     if isinstance(value, Mapping):
@@ -102,27 +109,106 @@ def format_argument(value: object) -> str:
     return str(value)
 
 
-def _format_float(value: float) -> str:
-    """Go ``%v`` 的浮点格式：最短往返的数字，指数小于 -4 或不小于 6 时用指数形式。"""
+def _render(template: str, arguments: Mapping[str, object] | None, *, strict: bool) -> str | None:
+    """逐段渲染模板；严格模式下任一占位符缺值返回 ``None``。"""
+    parts: list[str] = []
+    for segment in _segments(template):
+        if isinstance(segment, str):
+            parts.append(segment)
+        elif arguments is not None and segment.name in arguments:
+            parts.append(_format_value(arguments[segment.name], segment.specifier))
+        elif strict:
+            return None
+        else:
+            # 缺值：把占位符连同格式说明符原样留下，让遗漏可见而不是悄悄吞掉
+            parts.append(segment.raw)
+    return "".join(parts)
+
+
+def _segments(template: str) -> Iterator[str | _Placeholder]:
+    """把模板切成字面量与占位符，规则与 .NET 的 ``MessageTemplate`` 逐字相同。
+
+    每个位置先看 ``{{`` / ``}}`` 转义；``{`` 之后找第一个 ``}``，找不到时其余文本都是字面量；花括号之间第一个 ``:``
+    之前是名字，名字不合法时整段（含两个花括号）是字面量，不再在里面找占位符。
+    """
+    index, literal_start, length = 0, 0, len(template)
+    while index < length:
+        character = template[index]
+        if character in "{}" and index + 1 < length and template[index + 1] == character:
+            yield template[literal_start:index] + character
+            index += 2
+            literal_start = index
+            continue
+        if character != "{":
+            index += 1
+            continue
+        end = template.find("}", index + 1)
+        if end < 0:
+            break
+        body = template[index + 1 : end]
+        name, separator, specifier = body.partition(":")
+        if _PLACEHOLDER_NAME.fullmatch(name) is None:
+            index = end + 1
+            continue
+        if literal_start < index:
+            yield template[literal_start:index]
+        yield _Placeholder(name, specifier if separator else None, template[index : end + 1])
+        index = end + 1
+        literal_start = index
+    if literal_start < length:
+        yield template[literal_start:]
+
+
+def _format_value(value: object, specifier: str | None) -> str:
+    """按格式说明符格式化一个值；不是可移植的说明符、或说明符不适用于这个值时按无格式输出。"""
+    if specifier is not None and (match := _PORTABLE_SPECIFIER.fullmatch(specifier)) is not None:
+        kind, digits = match.group(1), match.group(2)
+        is_integer = isinstance(value, int) and not isinstance(value, bool)
+        is_number = is_integer or (isinstance(value, float) and math.isfinite(value))
+        if kind in "Dd" and is_integer:
+            assert isinstance(value, int)
+            return ("-" if value < 0 else "") + str(abs(value)).zfill(int(digits or "0"))
+        if kind in "Xx" and is_integer:
+            assert isinstance(value, int)
+            if value >= 0:
+                return format(value, kind).zfill(int(digits or "0"))
+        if kind in "FfNn" and is_number:
+            assert isinstance(value, (int, float))
+            return _fixed(value, int(digits) if digits else 2, grouping=kind in "Nn")
+    return format_argument(value)
+
+
+def _fixed(value: int | float, digits: int, *, grouping: bool) -> str:
+    """定点小数：按值的精确十进制展开舍入，正好一半时取偶（与 .NET 一致）；``grouping`` 时整数部分以 ``,`` 分组。
+
+    用局部的 Decimal 上下文：不受进程里改过的全局舍入方式影响，精度足够容纳整数部分，quantize 不会溢出。
+    """
+    exact = Decimal(value)
+    context = Context(prec=max(28, exact.adjusted() + digits + 2), rounding=ROUND_HALF_EVEN)
+    rounded = exact.quantize(Decimal(1).scaleb(-digits), context=context)
+    return format(rounded, ",f" if grouping else "f")
+
+
+def _float_text(value: float) -> str:
+    """浮点的文本形式：范围内写最短往返的定点形式，范围外写 .NET 的指数形式。"""
     if math.isnan(value):
         return "NaN"
     if math.isinf(value):
-        return "+Inf" if value > 0 else "-Inf"
+        return "Infinity" if value > 0 else "-Infinity"
     if value == 0:
         return "-0" if math.copysign(1.0, value) < 0 else "0"
     digits, point = shortest_digits(value)
     sign = "-" if value < 0 else ""
-    exponent = point - 1
-    if exponent < -4 or exponent >= 6:
-        return sign + exponent_notation(digits, point)
-    return sign + fixed_notation(digits, point)
+    if _PLAIN_FLOAT_MIN <= abs(value) < _PLAIN_FLOAT_MAX:
+        return sign + fixed_notation(digits, point)
+    return sign + exponent_notation(digits, point).upper()
 
 
 class MessageResolver(Protocol):
     """按区域把消息键解析成已格式化的文案（RFC-0010 IMessageResolver）。"""
 
     def resolve(self, key: str, locale: str, arguments: Mapping[str, object] | None) -> str | None:
-        """返回文案；没有该键或该区域时为 ``None``。"""
+        """返回文案；没有该键、该区域或占位符缺值时为 ``None``。"""
         ...
 
 
@@ -153,11 +239,11 @@ class Catalog:
         return self._locales
 
     def resolve(self, key: str, locale: str, arguments: Mapping[str, object] | None) -> str | None:
-        """解析消息键：先找请求的区域，没有再找 ``en-US``。"""
+        """解析消息键：先找请求的区域，没有再找 ``en-US``；按严格格式化，占位符缺值时为 ``None``（RFC-0010「解析」）。"""
         template = self._locales.get(locale, {}).get(key)
         if template is None and locale != DEFAULT_LOCALE:
             template = self._locales.get(DEFAULT_LOCALE, {}).get(key)
-        return None if template is None else format_message(template, arguments)
+        return None if template is None else try_format_message(template, arguments)
 
 
 # 进程默认的解析器与区域（RFC-0001 MessageScope.Default）：读取远多于设置，存成一个元组整体替换，

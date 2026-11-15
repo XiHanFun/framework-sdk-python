@@ -46,6 +46,7 @@ from xihan_framework.primitives._lifecycle import LifecycleState
 from xihan_framework.primitives._maybe import Maybe
 from xihan_framework.primitives._messages import (
     DEFAULT_LOCALE,
+    MAX_MESSAGE_KEY_LENGTH,
     Catalog,
     MessageResolver,
     default_locale,
@@ -58,6 +59,7 @@ from xihan_framework.primitives._messages import (
     positional,
     resolve_message,
     set_default_messages,
+    try_format_message,
 )
 from xihan_framework.primitives._result import UNIT, Result, Unit, fail, ok, success
 from xihan_framework.primitives._stability import Stability
@@ -81,6 +83,7 @@ __all__ = [
     "KIND_UNAVAILABLE",
     "KIND_UNEXPECTED",
     "KIND_VALIDATION",
+    "MAX_MESSAGE_KEY_LENGTH",
     "NAME",
     "REGISTERED_BAGGAGE_KEYS",
     "REPOSITORY",
@@ -118,5 +121,6 @@ __all__ = [
     "resolve_message",
     "set_default_messages",
     "success",
+    "try_format_message",
     "validate_error_code",
 ]

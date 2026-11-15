@@ -189,30 +189,43 @@ def test_error_messages_resolve_through_the_default_catalog() -> None:
 
 
 def test_templates_format_named_positional_and_escaped_placeholders() -> None:
-    assert primitives.format_message("{0} of {count:%03d}", {"0": "a", "count": 7}) == "a of 007"
+    # printf 风格的 %03d 不是可移植的说明符：按无格式输出，不再像 Go SDK 那样当成 fmt 动词（RFC-0010「模板」）
+    assert primitives.format_message("{0} of {count:%03d}", {"0": "a", "count": 7}) == "a of 7"
     assert primitives.format_message("{missing}", None) == "{missing}"
     assert primitives.format_message("{{id}} is {id}", {"id": 1}) == "{id} is 1"
     assert primitives.format_message("{0}-{1}", primitives.positional("x", 2)) == "x-2"
-    assert primitives.format_message("{amount:N2}", {"amount": 1.5}) == "1.5"
-    assert primitives.format_message("{count:%d}", {"count": "seven"}) == "seven"
-    assert primitives.placeholders("{a} {b:%d} {a} {{c}} {0}") == ["a", "b", "0"]
+    assert primitives.format_message("{amount:N2}", {"amount": 1.5}) == "1.50"
+    assert primitives.format_message("{when:yyyy-MM-dd}", {"when": "2026-11-16"}) == "2026-11-16"
+    assert primitives.format_message("{n:F2}", {"n": "seven"}) == "seven"
+    assert primitives.format_message("{n:X}", {"n": -1}) == "-1"
+    assert primitives.format_message("{_x}", {"_x": 1}) == "{_x}"
+    # 没有闭合的 { 之后全部原样输出，里面的 {{ 也不再当转义；有闭合但名字不合法的整段原样输出
+    assert primitives.format_message("a {b {{c", {"b": 1}) == "a {b {{c"
+    assert primitives.format_message("a {b {{c}", {"b": 1}) == "a {b {{c}"
+    assert primitives.format_message("{a b {x}}", {"x": 1}) == "{a b {x}}"
+    assert primitives.placeholders("{a} {b:%d} {a} {{c}} {0} {bad name}") == ["a", "b", "0"]
+    assert primitives.try_format_message("{a} {b}", {"a": 1}) is None
     assert primitives.describe("orders.failed", {"z": 1, "a": "x"}) == "orders.failed (a=x, z=1)"
     assert primitives.describe("orders.failed", {}) == "orders.failed"
 
 
-def test_arguments_are_written_like_go() -> None:
+def test_arguments_follow_the_text_forms() -> None:
     cases: list[tuple[object, str]] = [
         (True, "true"),
-        (None, "<nil>"),
+        (None, ""),
         (42, "42"),
         (1.5, "1.5"),
         (2.0, "2"),
         (100000.0, "100000"),
-        (1e6, "1e+06"),
+        (1e6, "1000000"),
         (0.0001, "0.0001"),
-        (0.00001, "1e-05"),
-        (123456789.0, "1.23456789e+08"),
+        (123456789.0, "123456789"),
+        (999999999999999.9, "999999999999999.9"),
         (-0.0, "-0"),
+        # 下面是规范不作规定的形式：范围外的浮点写成 .NET 的指数形式，数组与对象沿用 Go 的写法
+        (0.00001, "1E-05"),
+        (1e15, "1E+15"),
+        (float("inf"), "Infinity"),
         ([1, "a"], "[1 a]"),
         ({"b": 1, "a": 2}, "map[a:2 b:1]"),
     ]
@@ -365,8 +378,9 @@ def test_json_is_written_like_go_encoding_json() -> None:
         _json.loads("NaN")
 
 
-def test_error_encoding_and_descriptions_match_the_go_sdk_output() -> None:
-    # 期望值是 Go SDK（framework-sdk-go）对同样输入的实际输出：json.Marshal(err) 与 primitives.Describe
+def test_error_encoding_matches_the_go_bytes() -> None:
+    # JSON 的字节形式（成员顺序、转义、浮点写法）是 Go SDK 的 json.Marshal(err) 对同样输入的实际输出；
+    # message 里的描述按 RFC-0010「值的文本形式」（ADR-0233 起 null 写空串、浮点不用 Go 的 %v），与 Go 不同
     inner = Error.literal("KERNEL_UNEXPECTED_001", "boom <&>")
     details: dict[str, JsonValue] = {
         "z": 1.5,
@@ -376,8 +390,8 @@ def test_error_encoding_and_descriptions_match_the_go_sdk_output() -> None:
     error = Error.unexpected("ORDERS_UNEXPECTED_001", "orders.failed", details, inner)
     # 原始字符串：JSON 里的转义（\u2028、\t、\u003c）都是字面的反斜杠序列
     assert error.to_json() == (
-        r'{"code":"ORDERS_UNEXPECTED_001","message":"orders.failed (a=map[b:\u2028\t y:[1 x true \u003cnil\u003e 2 '
-        r'1e+21 1e-07]], m=1.23456789e+08, z=1.5)","messageKey":"orders.failed","details":{"a":{"b":"\u2028\t",'
+        r'{"code":"ORDERS_UNEXPECTED_001","message":"orders.failed (a=map[b:\u2028\t y:[1 x true  2 '
+        r'1E+21 1E-07]], m=123456789, z=1.5)","messageKey":"orders.failed","details":{"a":{"b":"\u2028\t",'
         r'"y":[1,"x",true,null,2,1e+21,1e-7]},"m":123456789,"z":1.5},"inner":{"code":"KERNEL_UNEXPECTED_001",'
         r'"message":"boom \u003c\u0026\u003e"}}'
     )
@@ -393,9 +407,9 @@ def test_error_encoding_and_descriptions_match_the_go_sdk_output() -> None:
         "s": "x",
     }
     assert primitives.describe("orders.failed", arguments) == (
-        "orders.failed (b=true, f=1e+06, g=100000, h=1e-05, i=42, l=[1 a], m=map[a:2 b:1], n=<nil>, s=x)"
+        "orders.failed (b=true, f=1000000, g=100000, h=1E-05, i=42, l=[1 a], m=map[a:2 b:1], n=, s=x)"
     )
-    assert primitives.format_message("{0} of {count:%03d} {x:N2}", {"0": "a", "count": 7, "x": 1.5}) == "a of 007 1.5"
+    assert primitives.format_message("{0} of {count:%03d} {x:N2}", {"0": "a", "count": 7, "x": 1.5}) == "a of 7 1.50"
 
 
 def _identity(value: JsonValue) -> JsonValue:
@@ -443,3 +457,26 @@ def test_unit_and_maybe_results_write_their_canonical_form() -> None:
     assert Result.maybe_from_json('{"ok":true,"value":null}', _identity).value == Maybe.none()
     with pytest.raises(FrameworkError):
         Result.unit_from_json('{"ok":true,"value":{}}')
+
+
+def test_message_templates_follow_the_vectors(vector: VectorLoader) -> None:
+    vectors = vector("primitives", "message-templates")
+    for key in vectors["keys"]["valid"]:
+        assert primitives.is_message_key(key), key
+    for key in vectors["keys"]["invalid"]:
+        assert not primitives.is_message_key(key), key
+    for case in vectors["format"]:
+        # 向量里的 JSON 值按原类型交给格式化：整数、浮点、布尔、字符串与 null
+        assert primitives.format_message(case["template"], case["arguments"]) == case["lenient"], case["name"]
+        assert primitives.try_format_message(case["template"], case["arguments"]) == case["strict"], case["name"]
+    for case in vectors["describe"]:
+        assert primitives.describe(case["key"], case["arguments"]) == case["text"], case["key"]
+
+
+def test_catalogs_resolve_strictly_and_fall_back_to_the_description() -> None:
+    catalog = Catalog({"en-US": {"orders.missing": "Order {id} of {tenant}."}})
+    assert catalog.resolve("orders.missing", "en-US", {"id": 1}) is None
+    assert catalog.resolve("orders.missing", "en-US", {"id": 1, "tenant": None}) == "Order 1 of ."
+    long_key = "a." + "b" * (primitives.MAX_MESSAGE_KEY_LENGTH - 2)
+    assert primitives.is_message_key(long_key)
+    assert not primitives.is_message_key(long_key + "b")
