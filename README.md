@@ -1,50 +1,97 @@
 # XiHan Framework SDK for Python
 
-> **占位仓库，尚未开始实现。** 规范在 [framework-spec](https://github.com/XiHanFun/framework-spec)，参考实现是 .NET（[XiHan.Framework](https://github.com/XiHanFun/XiHan.Framework) 的 `next/`），第二语言 Go 的实现在 [framework-sdk-go](https://github.com/XiHanFun/framework-sdk-go)，可以作为本 SDK 的形状参照。
+[XiHan Framework Spec](https://github.com/XiHanFun/framework-spec) 的 Python 实现：原语层、清单、调用上下文、管道与操作契约。语义与线上编码和 .NET 参考实现（[XiHan.Framework](https://github.com/XiHanFun/XiHan.Framework)）、Go SDK（[framework-sdk-go](https://github.com/XiHanFun/framework-sdk-go)）一致；规范以 submodule 放在 `spec/`，一致性由规范仓库的向量验证。面向 Python 应用、脚本型插件与 AI 工具链，Python 3.12+，运行时零依赖，处理器与中间件基于 asyncio。
 
-面向 Python 应用、脚本型插件与 AI 工具链，Python 3.12+。
+```bash
+pip install xihan-framework
+```
 
-## 计划内容
-
-按规范逐包实现，每个包都要通过 framework-spec 的一致性向量（`conformance/vectors/`）：
+PyPI 上目前只有占名用的 0.0.1；0.1.0 尚未发布，现在从源码安装（见「开发」）。导入名是 `xihan_framework`。
 
 | 包 | 内容 | 规范 |
 | --- | --- | --- |
-| primitives | `Error` / 错误码、`Result`、`Maybe`、类型化标识、生命周期状态、管道阶段、稳定性、Baggage 键、消息键与模板 | RFC-0001、RFC-0010、`conventions/` |
-| manifest | `xihan.manifest.json` 的模型、读取与校验，能力声明与依赖文本 | RFC-0002、`manifest/manifest.schema.json` |
-| invocation | 调用上下文：取消与截止时间、W3C 追踪、已登记的 Baggage | RFC-0003 |
-| pipeline | 十一阶段管道：登记、顺序约束、稳定拓扑排序、打印 | RFC-0004 |
-| operation | 操作契约、登记表、经完整管道执行的调用器（XGI JSON） | RFC-0011 |
-| plugin | 进程外插件运行时（`xihan.plugin.v1`，grpcio） | RFC-0017、`plugin/` |
-| caching 等远程 Provider | 子系统能力的操作集（首个是 `caching.distributed@1`） | RFC-0019、`provider/` |
+| `primitives` | `Error` / 错误码、`Result[T]`、`Maybe[T]`、`TypedId[V]`、`LifecycleState`、`PipelineStage`、`Stability`、Baggage 键、消息键与模板、`Catalog`、`FrameworkError` | RFC-0001、RFC-0010、`conventions/` |
+| `manifest` | `xihan.manifest.json` 的模型（冻结的 dataclass，构造即校验）、读取、规范化输出与校验，能力声明与依赖文本 | RFC-0002、`manifest/manifest.schema.json` |
+| `invocation` | 不可变的 `Context`：截止时间、可跨线程触发的 `Cancellation`、W3C 追踪、已登记的 Baggage、类型化键的对象袋；`Context.run` 以 `asyncio.timeout` 与取消信号执行协程，超时与取消翻译为 `KERNEL_TIMEOUT_001` / `KERNEL_CANCELLED_001` | RFC-0003 |
+| `pipeline` | 十一阶段的 `Builder`：`use` / `use_at` / `use_named_instance`、`before` / `after`、`describe` / `dump`、`build`；排序规则与错误码 `KERNEL_PIPELINE_00x` | RFC-0004 |
+| `operation` | `Contract`、`Schema`、异步处理器、容量 10000 的 `Registry`、经完整管道执行的 `Invoker`（XGI：JSON 请求与响应）与类型化入口 `invoke_typed` | RFC-0011 |
 
-插件实现用规范仓库的黑盒运行器验证：`xihan-conformance plugin --dir <产物目录>`。
+## 用法
 
-## 包名
+```python
+import asyncio
+from dataclasses import dataclass
 
-`xihan-framework`（PyPI）；导入名 `xihan_framework`。领域词与规范术语表（`conventions/vocabulary.md`）一致，只换本语言的大小写风格。
+from xihan_framework import operation, pipeline
+from xihan_framework.invocation import Context
+from xihan_framework.primitives import BAGGAGE_TENANT, Error, PipelineStage, Result, Stability, Unit, fail, ok
 
-## 成熟度
 
-Reference（.NET）、Stable（通过全部向量）、Experimental（部分向量）、Community（社区维护）。本仓库当前：**规划中**。
+@dataclass(frozen=True)
+class CreateOrder:
+    quantity: int
 
-## 参与
 
-1. 先读 framework-spec 的 README 与各 RFC，再看 framework-sdk-go 的包划分。
-2. 在本仓库开 Issue 认领要实现的包，一个包一个 PR，附向量测试。
-3. 公开契约的变更不在 SDK 仓库里做：走 framework-spec 的 RFC 流程，再同步到各 SDK。
+@dataclass(frozen=True)
+class OrderCreated:
+    id: str
+    tenant: str | None
 
-## 发布占位版本
 
-**已发布**：[PyPI 上的 `xihan-framework` 0.0.1](https://pypi.org/project/xihan-framework/)（2026-10-23），名字已占住。名字靠上传一个占位版本占住（PyPI 没有预留机制）。本仓库已含最小包（`pyproject.toml` + `src/xihan_framework/`，只导出 `__version__` 与 `SPEC_VERSION`）：
+async def create_order(ctx: Context, request: CreateOrder) -> Result[OrderCreated]:
+    if request.quantity <= 0:
+        return fail(
+            Error.validation("ORDERS_VALIDATION_001", "orders.quantity.invalid", {"quantity": request.quantity})
+        )
+    return ok(OrderCreated(id="o-1", tenant=ctx.tenant))
 
-```bash
-python -m pip install build twine
-python -m build
-python -m twine upload dist/*
+
+async def observe(ctx: Context, next_step: pipeline.Step) -> Result[Unit]:
+    outcome = await next_step(ctx)
+    print(operation.current(ctx), outcome)
+    return outcome
+
+
+async def main() -> None:
+    registry = operation.Registry()
+    registry.add(
+        operation.Contract("orders.create", stability=Stability.EXPERIMENTAL, expose=(operation.EXPOSE_HTTP,)),
+        create_order,
+        request_type=CreateOrder,
+        response_type=OrderCreated,
+    )
+    builder = pipeline.Builder().use_at(pipeline.func("Observe", observe), PipelineStage.OBSERVE)
+    invoker = operation.Invoker(registry, builder)
+
+    ctx = Context(timeout=2, baggage={BAGGAGE_TENANT: "t1"})
+    response = await invoker.invoke(ctx, operation.Request("orders.create", b'{"quantity":2}'))
+    print(response.outcome.is_ok, response.payload)  # True b'{"id":"o-1","tenant":"t1"}'
+
+
+asyncio.run(main())
 ```
 
-上传时用户名填 `__token__`、密码填 PyPI 的 API token。`xihan-framework` 与 `xihan_framework` 在 PyPI 是同一个名字；导入名是 `xihan_framework`。
+1. 可恢复失败返回 `fail(Error...)`，不抛异常；错误码按 `<领域大写>_<KIND>_<NNN>`，文案用消息键 + 参数，`Error.message` 经 `set_default_messages(Catalog(...), locale)` 解析，没有目录时是 `键 (参数)`。配置与编程错误（非法参数、清单不合法、管道约束成环、操作重复登记）抛 `FrameworkError`，它是 `ValueError` 的子类，带错误码。
+2. 请求与响应是 dataclass（也可以是原语、`list` / `tuple` / 键为 `str` 的 `dict`、枚举、`X | None`、`Maybe[T]`、`TypedId` 子类，或自带 `from_json_value` / `to_json_value` 的类型），用标准库编解码；成员名用 `field(metadata=operation.json_field("ttlMs"))` 改写。载荷不合法返回 `KERNEL_VALIDATION_001`，`reason` 只写 JSON 路径（`$.quantity`）。
+3. 处理器与中间件都是 `async def`；`Invoker` 在 `Context.run` 里执行整条管道：截止时间到了取消协程并返回 `KERNEL_TIMEOUT_001`，`ctx.cancellation.cancel()`（可以在任何线程调用）取消协程并返回 `KERNEL_CANCELLED_001`，两者同时触发时报超时；任务被别处取消时 `CancelledError` 照常传播。
+4. 清单：`manifest.read(data)` / `manifest.read_file(path)` 解析并校验（未知字段、类型不符、格式与跨字段约束都抛 `FrameworkError`），`manifest.write(m)` 输出两空格缩进、字段按 Schema 顺序、缺省值省略的规范化 JSON。
+
+`Result`、`Error`、`Maybe` 的 JSON 编码与 .NET 参考实现一致（`{"ok":true,"value":…}` / `{"ok":false,"error":{…}}`），写出与 Go SDK 的 `encoding/json` 逐字节相同（浮点数的写法、`<` `>` `&` 的转义、映射键的排序）；生命周期迁移表、管道阶段顺序、错误码、Baggage 键与能力依赖的文法都由 `spec/conformance/vectors` 验证。
+
+## 开发
+
+```bash
+git submodule update --init          # spec/
+python -m venv .venv                 # Windows 上用 py -3.13 -m venv .venv
+python -m pip install -e . --group dev
+ruff check && ruff format --check && mypy && pytest
+```
+
+`--group` 需要 pip 25.1 以上。测试直接读取 `spec/conformance/vectors/` 下的向量，子模块没有检出时测试失败而不是跳过。
+
+## 状态
+
+`0.1.0`（未发布）：`primitives`、`manifest`、`invocation`、`pipeline`、`operation` 五个包可用。进程外插件运行时 `plugin`（`xihan.plugin.v1`，基于 `grpc.aio`，以 extra `xihan-framework[plugin]` 引入 grpcio）与远程 Provider 的操作集（首个是 `caching.distributed@1`）规划中；Wasm 载体不在本 SDK 范围。
 
 ## 许可
 
