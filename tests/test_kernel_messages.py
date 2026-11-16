@@ -27,6 +27,7 @@ SDK_PAIRS = {
     (operation.ERROR_CODE_UNEXPECTED, operation.MESSAGE_NO_RESPONSE),
     (operation.ERROR_CODE_DUPLICATE, operation.MESSAGE_DUPLICATE),
     (operation.ERROR_CODE_REGISTRY_FULL, operation.MESSAGE_REGISTRY_FULL),
+    (operation.ERROR_CODE_UNEXPECTED, operation.MESSAGE_UNHANDLED_EXCEPTION),
 }
 
 
@@ -39,6 +40,10 @@ async def ping(ctx: Context, request: Ping) -> Result[Ping]:
     return ok(request)
 
 
+async def explode(ctx: Context, request: Ping) -> Result[Ping]:
+    raise LookupError("boom")
+
+
 async def short_circuit(ctx: Context, next_step: Step) -> Result[Unit]:
     return success()
 
@@ -47,6 +52,7 @@ def produced_errors() -> list[Error]:
     """逐个触发 SDK 实际产生的内核错误。"""
     registry = Registry()
     registry.add(Contract("pings.send"), ping, request_type=Ping, response_type=Ping)
+    registry.add(Contract("pings.explode"), explode, request_type=Ping, response_type=Ping)
     invoker = Invoker(registry)
     cached = Invoker(registry, Builder().use_at(pipeline.func("Cache", short_circuit), PipelineStage.IDEMPOTENCY))
 
@@ -58,6 +64,7 @@ def produced_errors() -> list[Error]:
             (await invoker.invoke(Context(), Request("pings.send", b'{"count":"x"}'))).outcome.error,
             (await invoker.invoke_typed(Context(), "pings.send", Ping(), str)).error,
             (await cached.invoke_typed(Context(), "pings.send", Ping(), Ping)).error,
+            (await invoker.invoke(Context(), Request("pings.explode"))).outcome.error,
         ]
 
     errors = [error for error in asyncio.run(collect()) if error is not None]
@@ -80,9 +87,7 @@ def produced_errors() -> list[Error]:
 def test_built_in_templates_match_the_vector(vector: VectorLoader) -> None:
     messages = vector("primitives", "kernel-messages")["messages"]
     templates = BUILT_IN_CATALOG.locales[primitives.DEFAULT_LOCALE]
-    # 向量之外只多一个键：RFC-0011 规则 5 要 SDK 翻译未处理的异常，向量还没有列出它的键，模板取自 .NET 的 en-US.json
-    assert set(templates) - {operation.MESSAGE_UNHANDLED_EXCEPTION} == {message["key"] for message in messages}
-    assert templates[operation.MESSAGE_UNHANDLED_EXCEPTION] == "An unhandled exception occurred during the invocation."
+    assert set(templates) == {message["key"] for message in messages}
     for message in messages:
         assert templates[message["key"]] == message["template"], message["key"]
         assert primitives.placeholders(message["template"]) == message["arguments"], message["key"]
