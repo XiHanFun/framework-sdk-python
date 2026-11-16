@@ -17,6 +17,7 @@ from xihan_framework.invocation import (
     Context,
     ItemKey,
     cancelled_error,
+    format_trace_parent,
     parse_trace_parent,
 )
 from xihan_framework.primitives import (
@@ -318,27 +319,32 @@ def test_contexts_drop_unacceptable_baggage_values(vector: Callable[[str, str], 
         assert derived.correlation == "c1", value
 
 
-def test_trace_flags_are_kept_and_written() -> None:
-    # 没有上游时标志为空，写出 01；上游的 00 原样写出；其余位原样保留，采样只看最低位（RFC-0003 规则 7）
-    root = Context()
-    assert root.trace_flags is None
-    assert root.sampled
-    assert root.trace_parent.endswith("-01")
+def test_trace_context_follows_the_vectors(vector: Callable[[str, str], Any]) -> None:
+    vectors = vector("primitives", "trace-context")
+    for case in vectors["parse"]["valid"]:
+        parsed = parse_trace_parent(case["text"])
+        assert parsed == (case["traceId"], case["spanId"], case["sampled"]), case["text"]
+        ctx = Context(trace_parent=case["text"])
+        assert (ctx.trace_id, ctx.span_id, ctx.sampled) == (case["traceId"], case["spanId"], case["sampled"])
+    for text in vectors["parse"]["invalid"]:
+        assert parse_trace_parent(text) is None, text
+        # 不合法的 traceparent 当作没有给出：生成新的追踪，没有上游
+        ctx = Context(trace_parent=text)
+        assert ctx.sampled is None, text
+        assert ctx.trace_parent.endswith("-01")
+    for case in vectors["format"]:
+        assert format_trace_parent(case["traceId"], case["spanId"], case["sampled"]) == case["text"]
+        ctx = Context(trace_id=case["traceId"], span_id=case["spanId"], sampled=case["sampled"])
+        assert ctx.trace_parent == case["text"]
+        assert ctx.with_baggage(BAGGAGE_TENANT, "t1").trace_parent == case["text"]
+
+
+def test_trace_flags_write_only_the_sampled_bit() -> None:
+    # 上游的标志只取采样位，其余位不进上下文；写出总是 00 或 01（RFC-0003 规则 7，ADR-0235）
     upstream = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-"
-    for flags, sampled in [("00", False), ("01", True), ("03", True), ("02", False), ("ff", True)]:
-        ctx = Context(trace_parent=upstream + flags)
-        assert ctx.trace_flags == int(flags, 16)
-        assert ctx.sampled is sampled, flags
-        assert ctx.trace_parent == upstream + flags
-        assert ctx.with_baggage(BAGGAGE_TENANT, "t1").trace_parent == upstream + flags
-    parsed = parse_trace_parent(upstream + "03")
-    assert parsed is not None
-    assert parsed.flags == 3
-    assert parsed.sampled
-    explicit = Context(trace_id="1" * 32, span_id="2" * 16, trace_flags=0)
-    assert explicit.trace_parent == f"00-{'1' * 32}-{'2' * 16}-00"
-    assert Context(trace_id="1" * 32).trace_parent.endswith("-01")
+    assert Context(trace_parent=upstream + "03").trace_parent == upstream + "01"
+    assert Context(trace_parent=upstream + "02").trace_parent == upstream + "00"
+    assert str(parse_trace_parent(upstream + "ff")) == upstream + "01"
+    assert Context().sampled is None
     with pytest.raises(FrameworkError):
-        Context(trace_flags=256)
-    with pytest.raises(FrameworkError):
-        Context(trace_parent=upstream + "01", trace_flags=1)
+        Context(trace_parent=upstream + "01", sampled=True)

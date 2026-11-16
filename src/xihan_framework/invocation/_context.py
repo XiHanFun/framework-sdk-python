@@ -38,7 +38,8 @@ MESSAGE_CANCELLED: Final = "kernel.invocation.cancelled"
 MESSAGE_DEADLINE_BEFORE_START: Final = "kernel.invocation.deadline_before_start"
 
 # W3C traceparent：version-traceid-spanid-flags，全小写十六进制
-_TRACE_PARENT = re.compile(r"([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})")
+# W3C traceparent 只认版本 00 与小写十六进制（RFC-0003 规则 7，ADR-0235）；其他版本、大写、多余的段都不合法
+_TRACE_PARENT = re.compile(r"00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})")
 _TRACE_ID = re.compile(r"[0-9a-f]{32}")
 _SPAN_ID = re.compile(r"[0-9a-f]{16}")
 _ZERO_TRACE_ID: Final = "0" * 32
@@ -46,24 +47,31 @@ _ZERO_SPAN_ID: Final = "0" * 16
 
 
 class TraceParent(NamedTuple):
-    """解析后的 W3C traceparent：``flags`` 是 trace-flags 的字节，原样保留，是否采样只看最低位。"""
+    """W3C traceparent（RFC-0001 ``TraceParent``）：trace-id、parent-id 与采样位；标志的其余位不进上下文。"""
 
     trace_id: str
     span_id: str
-    flags: int
+    sampled: bool
 
-    @property
-    def sampled(self) -> bool:
-        """采样位（trace-flags 的最低位）。"""
-        return bool(self.flags & 0x01)
+    def __str__(self) -> str:
+        """写出的文本：版本 ``00``，标志只写采样位。"""
+        return format_trace_parent(self.trace_id, self.span_id, self.sampled)
 
 
 def parse_trace_parent(text: str) -> TraceParent | None:
-    """解析 W3C traceparent；格式不对或 ID 全零时为 ``None``。"""
+    """解析 W3C traceparent：只认 ``^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$``，ID 全零也不合法，不合法时为 ``None``。
+
+    是否采样只看标志的最低位；不合法的 traceparent 当作没有给出，不报错。
+    """
     match = _TRACE_PARENT.fullmatch(text)
-    if match is None or match.group(2) == _ZERO_TRACE_ID or match.group(3) == _ZERO_SPAN_ID:
+    if match is None or match.group(1) == _ZERO_TRACE_ID or match.group(2) == _ZERO_SPAN_ID:
         return None
-    return TraceParent(match.group(2), match.group(3), int(match.group(4), 16))
+    return TraceParent(match.group(1), match.group(2), bool(int(match.group(3), 16) & 0x01))
+
+
+def format_trace_parent(trace_id: str, span_id: str, sampled: bool | None) -> str:
+    """写出 traceparent：版本 ``00``，标志只写采样位 ``00`` / ``01``；``sampled`` 为 ``None``（没有上游、没有采样器）时写 ``01``。"""
+    return f"00-{trace_id}-{span_id}-{'00' if sampled is False else '01'}"
 
 
 def new_trace_id() -> str:
@@ -236,7 +244,7 @@ class Context:
     截止时间与取消信号下执行协程，把超时与取消翻译成 ``KERNEL_TIMEOUT_001`` / ``KERNEL_CANCELLED_001``。
     """
 
-    __slots__ = ("_baggage", "_cancellation", "_deadline", "_items", "_span_id", "_trace_flags", "_trace_id")
+    __slots__ = ("_baggage", "_cancellation", "_deadline", "_items", "_sampled", "_span_id", "_trace_id")
 
     def __init__(
         self,
@@ -247,20 +255,20 @@ class Context:
         trace_id: str | None = None,
         span_id: str | None = None,
         trace_parent: str | None = None,
-        trace_flags: int | None = None,
+        sampled: bool | None = None,
         baggage: Mapping[str, str] | None = None,
     ) -> None:
         """创建上下文。
 
         ``cancellation`` 省略时创建新的信号（经 ``cancellation`` 属性取得）；``deadline`` 是带时区的绝对时刻，
         ``timeout`` 是相对现在的时长（秒或 ``timedelta``），二者至多给一个。``trace_parent`` 是外部输入，
-        不合法时忽略；``trace_id`` / ``span_id`` / ``trace_flags`` 是调用方给的值，不合法即编程错误。没有追踪时生成
-        新的 Trace ID 与 Span ID；``trace_flags`` 为 ``None`` 表示没有上游（RFC-0003 规则 7），按已采样处理。Baggage 的键必须符合 ``xihan.<name>``；已登记键的值不合约束的成员丢弃
+        不合法时当作没有给出；``trace_id`` / ``span_id`` 是调用方给的值，不合法即编程错误。没有追踪时生成新的 Trace ID
+        与 Span ID；``sampled`` 是上游的采样决定，``None`` 表示没有上游（RFC-0003 规则 7），写出时按已采样写 ``01``。Baggage 的键必须符合 ``xihan.<name>``；已登记键的值不合约束的成员丢弃
         （``xihan.idempotency-key`` 除外，见 ``is_baggage_value_acceptable``）。
         """
         if deadline is not None and timeout is not None:
             raise FrameworkError(ERROR_CODE_INVALID_ARGUMENT, "A context takes either a deadline or a timeout.")
-        if trace_parent is not None and (trace_id is not None or span_id is not None or trace_flags is not None):
+        if trace_parent is not None and (trace_id is not None or span_id is not None or sampled is not None):
             raise FrameworkError(
                 ERROR_CODE_INVALID_ARGUMENT, "A context takes either a traceparent or trace and span IDs."
             )
@@ -272,11 +280,7 @@ class Context:
             delta = timeout if isinstance(timeout, timedelta) else timedelta(seconds=timeout)
             deadline = datetime.now(UTC) + delta
         if trace_parent is not None and (parsed := parse_trace_parent(trace_parent)) is not None:
-            trace_id, span_id, trace_flags = parsed
-        if trace_flags is not None and not 0 <= trace_flags <= 0xFF:
-            raise FrameworkError(
-                ERROR_CODE_INVALID_ARGUMENT, f"The trace flags {trace_flags} must be a byte (0 to 255)."
-            )
+            trace_id, span_id, sampled = parsed
         if trace_id is not None and (_TRACE_ID.fullmatch(trace_id) is None or trace_id == _ZERO_TRACE_ID):
             raise FrameworkError(
                 ERROR_CODE_INVALID_ARGUMENT, f"The trace ID '{trace_id}' must be 32 lowercase hex digits, not all zero."
@@ -294,7 +298,7 @@ class Context:
         self._deadline = deadline
         self._trace_id = new_trace_id() if trace_id is None else trace_id
         self._span_id = new_span_id() if span_id is None else span_id
-        self._trace_flags = trace_flags
+        self._sampled = sampled
         self._baggage: Mapping[str, str] = MappingProxyType(copied)
         self._items = _Items()
 
@@ -334,20 +338,14 @@ class Context:
         return self._span_id
 
     @property
-    def trace_flags(self) -> int | None:
-        """上游给的 trace-flags；``None`` 表示没有上游，这次调用是链路的根。"""
-        return self._trace_flags
-
-    @property
-    def sampled(self) -> bool:
-        """采样位：trace-flags 的最低位；没有上游时为真。"""
-        return self._trace_flags is None or bool(self._trace_flags & 0x01)
+    def sampled(self) -> bool | None:
+        """上游的采样决定；``None`` 表示没有上游，这次调用是链路的根。"""
+        return self._sampled
 
     @property
     def trace_parent(self) -> str:
-        """W3C traceparent；标志总写两位十六进制，没有上游时写 ``01``，上游的标志（含其余位）原样写出（RFC-0003 规则 7）。"""
-        flags = 0x01 if self._trace_flags is None else self._trace_flags
-        return f"00-{self._trace_id}-{self._span_id}-{flags:02x}"
+        """W3C traceparent：版本 ``00``，标志只写采样位，没有上游时写 ``01``（RFC-0003 规则 7）。"""
+        return format_trace_parent(self._trace_id, self._span_id, self._sampled)
 
     @property
     def baggage(self) -> Mapping[str, str]:
@@ -491,7 +489,7 @@ class Context:
         derived._deadline = self._deadline
         derived._trace_id = self._trace_id
         derived._span_id = self._span_id
-        derived._trace_flags = self._trace_flags
+        derived._sampled = self._sampled
         derived._baggage = MappingProxyType(baggage)
         derived._items = self._items
         return derived
