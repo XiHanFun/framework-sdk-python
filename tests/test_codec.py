@@ -225,6 +225,10 @@ def test_exact_payloads_keep_number_texts() -> None:
     assert repr(big) == "JsonNumber('1e400')"
     assert str(two) == "2.0"
     assert _json.dumps(value) == "[1e400,2.0,9223372036854775808,3,-0.0]"
+    assert _json.dumps(value, strict=True) == "[1e400,2.0,9223372036854775808,3,-0.0]"
+    # 写出类型化的值时非有限的浮点写不出，不写成字符串或 null
+    with pytest.raises(ValueError, match="cannot be written"):
+        _json.dumps([float("nan")], strict=True)
     with pytest.raises(ValueError, match="not a JSON number"):
         JsonNumber("1.")
     # 按类型解码时取它的浮点值，Literal 与枚举按值比较

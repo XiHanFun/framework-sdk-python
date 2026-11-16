@@ -275,6 +275,18 @@ class Refresh:
     note: str | None = field(default=None, metadata=json_field(omit_none=True))
 
 
+@dataclass(frozen=True)
+class Measure:
+    ratio: float
+
+
+class Misconfigured:
+    """自带 to_json_value、写出时抛出框架异常的响应。"""
+
+    def to_json_value(self) -> JsonValue:
+        raise FrameworkError("ORDERS_VALIDATION_009", "the response is misconfigured")
+
+
 def test_renamed_members_and_unencodable_responses() -> None:
     registry = Registry()
 
@@ -284,23 +296,48 @@ def test_renamed_members_and_unencodable_responses() -> None:
     async def special(ctx: Context, request: Empty) -> Result[list[float]]:
         return ok([float("nan"), 2.0])
 
+    async def measure(ctx: Context, request: Empty) -> Result[Measure]:
+        return ok(Measure(float("inf")))
+
     async def broken(ctx: Context, request: Empty) -> Result[object]:
         return ok(object())
 
+    async def misconfigured(ctx: Context, request: Empty) -> Result[Misconfigured]:
+        return ok(Misconfigured())
+
     registry.add(Contract("cache-entries.try-refresh"), refresh, request_type=Refresh, response_type=Refresh)
     registry.add(Contract("numbers.list"), special, request_type=Empty, response_type=list)
+    registry.add(Contract("numbers.measure"), measure, request_type=Empty, response_type=Measure)
     registry.add(Contract("numbers.get"), broken, request_type=Empty, response_type=object)
+    registry.add(Contract("numbers.configure"), misconfigured, request_type=Empty, response_type=Misconfigured)
     invoker = Invoker(registry)
     response = invoke(invoker, Request("cache-entries.try-refresh", b'{"key":"k","ttlMs":500,"unknown":true}'))
     assert response.payload == b'{"key":"k","ttlMs":500}'
     # 缺少必填成员报所在对象的路径（RFC-0011 规则 2，ADR-0236）
     missing = invoke(invoker, Request("cache-entries.try-refresh", b'{"key":"k","ttl_ms":500}'))
     assert error_of(missing).details == {"id": "cache-entries.try-refresh", "reason": "$"}
-    # 响应按值模型写：非有限的浮点写成字符串，整数值的浮点带 .0
-    assert invoke(invoker, Request("numbers.list")).payload == b'["NaN",2.0]'
-    unencodable = error_of(invoke(invoker, Request("numbers.get")))
-    assert unencodable.code == operation.ERROR_CODE_UNEXPECTED
-    assert unencodable.message.startswith("The response of 'numbers.get' could not be encoded:")
+    # 响应写不出（类型化的浮点是 NaN 或无穷、编码不了的值）时以 unhandled_exception 结束，不抛给调用方，没有载荷；
+    # NaN 不写成 null 或字符串（RFC-0011 规则 10 的「编码」）
+    for id in ["numbers.list", "numbers.measure", "numbers.get"]:
+        unencodable = invoke(invoker, Request(id))
+        assert unencodable.payload is None, id
+        error = error_of(unencodable)
+        assert (error.code, error.message_key, error.inner) == (
+            operation.ERROR_CODE_UNEXPECTED,
+            operation.MESSAGE_UNHANDLED_EXCEPTION,
+            None,
+        ), id
+        assert error.message == "An unhandled exception occurred during the invocation."
+    # 框架异常的错误放进 inner
+    wrapped = error_of(invoke(invoker, Request("numbers.configure")))
+    assert wrapped.message_key == operation.MESSAGE_UNHANDLED_EXCEPTION
+    assert wrapped.inner == Error.literal("ORDERS_VALIDATION_009", "the response is misconfigured")
+    # 不经过管道的 execute 同样如此
+    descriptor = registry.find("numbers.measure")
+    assert descriptor is not None
+    direct = asyncio.run(descriptor.execute(Context(), b""))
+    assert direct.payload is None
+    assert error_of(direct).message_key == operation.MESSAGE_UNHANDLED_EXCEPTION
 
 
 def test_contracts_schemas_and_types_are_checked_when_registering() -> None:
@@ -459,6 +496,24 @@ def test_arbitrary_json_members_keep_the_numbers_they_read() -> None:
     assert type(meta["int"]) is int
     assert isinstance(meta["float"], JsonNumber)
     assert meta["float"] == 2.0
+
+
+def test_responses_are_encoded_after_the_pipeline() -> None:
+    # RFC-0011 规则 10 的「编码」：XGI 入口在管道结束之后编码，中间件看到的是编码之前的响应对象
+    seen: list[tuple[object, bytes | None]] = []
+
+    async def egress(ctx: Context, next_step: Step) -> Result[Unit]:
+        outcome = await next_step(ctx)
+        seen.append((operation.response_of(ctx), operation.response_payload_of(ctx)))
+        return outcome
+
+    invoker = new_invoker(Builder().use_at(pipeline.func("Egress", egress), PipelineStage.EGRESS))
+    ctx = Context(baggage={BAGGAGE_CORRELATION: "c9"})
+    response = invoke(invoker, Request("orders.create", b'{"quantity":2}'), ctx)
+    assert seen == [(OrderCreated(id="o-c9", quantity=2), None)]
+    assert response.payload == b'{"id":"o-c9","quantity":2}'
+    assert operation.response_payload_of(ctx) == response.payload
+    assert operation.response_of(ctx) == OrderCreated(id="o-c9", quantity=2)
 
 
 def test_built_in_steps_sit_where_the_dotnet_middleware_does() -> None:

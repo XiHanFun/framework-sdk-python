@@ -202,14 +202,18 @@ class Descriptor:
         return self._response_type
 
     async def execute(self, ctx: Context, payload: bytes) -> Response:
-        """解码载荷、执行、编码响应；解码失败返回 ``KERNEL_VALIDATION_001``，不执行操作。
+        """不经过管道地解码、执行并编码响应；解码失败返回 ``KERNEL_VALIDATION_001``，不执行操作。
 
-        不经过管道；调用器在 Validate 阶段解码、在管道的终点执行。
+        响应写不出时与调用器相同（RFC-0011 规则 10 的「编码」）：``KERNEL_UNEXPECTED_001`` +
+        ``kernel.invocation.unhandled_exception``，没有载荷。调用器在 Validate 阶段解码、在管道的终点执行、在管道结束之后编码。
         """
         request, invalid = self.decode(payload)
         if invalid is not None:
             return Response(fail(invalid))
-        return await self._execute(ctx, request)
+        result = await self._handler(ctx, request)
+        if result.error is not None:
+            return Response(fail(result.error))
+        return self._encode_response(result.value)
 
     def decode(self, payload: bytes) -> tuple[object, Error | None]:
         """解码请求载荷（RFC-0011 规则 2）：成功时为 ``(请求, None)``，不合法时为 ``(None, KERNEL_VALIDATION_001)``。
@@ -228,18 +232,15 @@ class Descriptor:
         except DecodeError as error:
             return None, self._invalid_payload(error.path)
 
-    async def _execute(self, ctx: Context, request: object) -> Response:
-        """以解码好的请求执行，编码成功的响应。"""
-        result = await self._handler(ctx, request)
-        if result.error is not None:
-            return Response(fail(result.error))
+    def _encode_response(self, value: object) -> Response:
+        """把成功的响应对象编码成载荷；写不出（非有限的浮点、编码不了的值）时以 ``unhandled_exception`` 结束，不抛出。"""
         try:
-            encoded = dumps(encode(result.value)).encode("utf-8")
-        except (TypeError, ValueError) as error:
+            payload = dumps(encode(value), strict=True).encode("utf-8")
+        except Exception as exception:
             return Response(
-                fail(Error.literal(ERROR_CODE_UNEXPECTED, f"The response of '{self.id}' could not be encoded: {error}"))
+                fail(_unhandled(self.id, exception, "The response of the operation '%s' could not be encoded."))
             )
-        return Response(success(), encoded)
+        return Response(success(), payload)
 
     def _invalid_payload(self, reason: str) -> Error:
         """载荷不合法的错误。"""
@@ -316,8 +317,8 @@ _logger = logging.getLogger("xihan_framework.operation")
 
 
 @dataclass(frozen=True, slots=True)
-class _Decoded:
-    """Validate 阶段解码好的请求；包一层是为了与“还没有解码”区分开。"""
+class _Box:
+    """对象袋里的请求或响应对象；包一层是为了与“还没有”区分开。"""
 
     value: object
 
@@ -325,7 +326,8 @@ class _Decoded:
 # 上下文对象袋里的键；只在本模块里写入
 _DESCRIPTOR: Final = ItemKey[Descriptor]("xihan.operation.descriptor")
 _REQUEST: Final = ItemKey[Request]("xihan.operation.request")
-_DECODED: Final = ItemKey[_Decoded | None]("xihan.operation.decoded")
+_DECODED: Final = ItemKey[_Box | None]("xihan.operation.decoded")
+_PRODUCED: Final = ItemKey[_Box | None]("xihan.operation.produced")
 _RESPONSE: Final = ItemKey[bytes | None]("xihan.operation.response")
 _TERMINAL: Final = ItemKey[Step | None]("xihan.operation.terminal")
 
@@ -346,8 +348,14 @@ def decoded_request_of(ctx: Context) -> object | None:
     return None if decoded is None else decoded.value
 
 
+def response_of(ctx: Context) -> object | None:
+    """执行成功的响应对象（RFC-0011 规则 3）：处理器返回之后才有，是编码之前的对象，管道里的中间件看到的就是它。"""
+    produced = ctx.find_item(_PRODUCED)
+    return None if produced is None else produced.value
+
+
 def response_payload_of(ctx: Context) -> bytes | None:
-    """``handle`` 阶段写回的响应载荷（成功时）。"""
+    """XGI 入口在管道结束之后编码的响应载荷（成功时）；管道里还没有它。"""
     return ctx.find_item(_RESPONSE)
 
 
@@ -367,7 +375,9 @@ class Invoker:
     - Validate 阶段的 ``ValidationMiddleware``：原始调用在这里解码载荷，失败即 ``KERNEL_VALIDATION_001``；类型化调用跳过。
 
     进入管道之前只核对未登记（``KERNEL_NOTFOUND_001``）与类型化调用的类型不符（``KERNEL_VALIDATION_002``），按这个顺序。
-    操作描述、请求与响应放在上下文的对象袋里，派生上下文共享对象袋，所以并发的调用各用自己的上下文。
+    XGI 入口在管道结束之后才把响应对象编码成载荷，中间件看到的是编码之前的对象（``response_of``）；写不出时以
+    ``kernel.invocation.unhandled_exception`` 结束（规则 10 的「编码」）。操作描述、请求与响应放在上下文的对象袋里，
+    派生上下文共享对象袋，所以并发的调用各用自己的上下文。
     """
 
     __slots__ = ("_pipeline", "_registry", "_step")
@@ -405,9 +415,11 @@ class Invoker:
         return self._pipeline.dump()
 
     async def invoke(self, ctx: Context, request: Request) -> Response:
-        """执行一个 XGI 请求：未登记返回 ``KERNEL_NOTFOUND_001``（不进管道）；否则经完整管道执行。
+        """执行一个 XGI 请求：未登记返回 ``KERNEL_NOTFOUND_001``（不进管道）；否则经完整管道执行，结束之后编码响应。
 
-        管道成功结束而没有执行操作（中间件短路成功）时返回 ``KERNEL_UNEXPECTED_001`` + ``kernel.operation.no_response``。
+        管道成功结束而没有执行操作（中间件短路成功）时返回 ``KERNEL_UNEXPECTED_001`` + ``kernel.operation.no_response``；
+        响应写不出（类型化的浮点是 NaN 或无穷、编码不了的值）时返回 ``KERNEL_UNEXPECTED_001`` +
+        ``kernel.invocation.unhandled_exception``，框架异常的错误放进 ``inner``，不抛给调用方，没有载荷。
         """
         descriptor = self._registry.find(request.id)
         if descriptor is None:
@@ -417,16 +429,18 @@ class Invoker:
         outcome = await self._step(ctx)
         if outcome.is_failed:
             return Response(outcome)
-        payload = ctx.find_item(_RESPONSE)
-        if payload is None:
+        produced = ctx.find_item(_PRODUCED)
+        if produced is None:
             # 管道成功结束却没有响应：某个中间件以成功短路、handle 没有执行（RFC-0011 规则 9），不返回成功的空载荷
             return Response(fail(_no_response(request.id)))
-        return Response(outcome, payload)
+        response = descriptor._encode_response(produced.value)
+        ctx.set_item(_RESPONSE, response.payload)
+        return response
 
     async def invoke_typed[Req, Res](
         self, ctx: Context, id: str, request: Req, response_type: type[Res]
     ) -> Result[Res]:
-        """类型化入口：不经 JSON，直接以请求对象经完整管道执行，Validate 阶段不解码。
+        """类型化入口：不经 JSON，直接以请求对象经完整管道执行，Validate 阶段不解码，响应也不编码。
 
         请求不是登记的请求类型的实例、或 ``response_type`` 不是登记的响应类型时返回 ``KERNEL_VALIDATION_002``（参数只有
         ``id``）；管道成功结束却没有执行操作（中间件短路成功）时返回 ``KERNEL_UNEXPECTED_001``。
@@ -442,9 +456,11 @@ class Invoker:
         async def terminal(ctx: Context) -> Result[Unit]:
             result = await handler(ctx, request)
             results.append(result)
+            if result.error is None:
+                ctx.set_item(_PRODUCED, _Box(result.value))
             return result.unit()
 
-        self._enter(ctx, descriptor, Request(id), _Decoded(request), terminal)
+        self._enter(ctx, descriptor, Request(id), _Box(request), terminal)
         try:
             outcome = await self._step(ctx)
         finally:
@@ -457,12 +473,13 @@ class Invoker:
 
     @staticmethod
     def _enter(
-        ctx: Context, descriptor: Descriptor, request: Request, decoded: _Decoded | None, terminal: Step | None
+        ctx: Context, descriptor: Descriptor, request: Request, decoded: _Box | None, terminal: Step | None
     ) -> None:
         """把这次调用的描述、请求与终点放进对象袋，清掉上一次的解码结果与响应。"""
         ctx.set_item(_DESCRIPTOR, descriptor)
         ctx.set_item(_REQUEST, request)
         ctx.set_item(_DECODED, decoded)
+        ctx.set_item(_PRODUCED, None)
         ctx.set_item(_RESPONSE, None)
         ctx.set_item(_TERMINAL, terminal)
 
@@ -477,13 +494,8 @@ async def _observe(ctx: Context, next_step: Step) -> Result[Unit]:
         return await next_step(ctx)
     except Exception as exception:
         descriptor = current(ctx)
-        _logger.error(
-            "The operation '%s' raised an unhandled exception.",
-            None if descriptor is None else descriptor.id,
-            exc_info=exception,
-        )
-        inner = exception.to_error() if isinstance(exception, FrameworkError) else None
-        return fail(Error.unexpected(ERROR_CODE_UNEXPECTED, MESSAGE_UNHANDLED_EXCEPTION, None, inner))
+        id = None if descriptor is None else descriptor.id
+        return fail(_unhandled(id, exception, "The operation '%s' raised an unhandled exception."))
 
 
 async def _deadline(ctx: Context, next_step: Step) -> Result[Unit]:
@@ -499,12 +511,12 @@ async def _validate(ctx: Context, next_step: Step) -> Result[Unit]:
         value, invalid = descriptor.decode(b"" if request is None else request.payload)
         if invalid is not None:
             return fail(invalid)
-        ctx.set_item(_DECODED, _Decoded(value))
+        ctx.set_item(_DECODED, _Box(value))
     return await next_step(ctx)
 
 
 async def _dispatch(ctx: Context) -> Result[Unit]:
-    """管道的终点：类型化调用执行它放进来的终点，否则以解码好的请求执行当前操作并把响应载荷写回上下文。"""
+    """管道的终点：类型化调用执行它放进来的终点，否则以解码好的请求执行当前操作，把响应对象放进对象袋，不编码。"""
     terminal = ctx.find_item(_TERMINAL)
     if terminal is not None:
         return await terminal(ctx)
@@ -515,12 +527,22 @@ async def _dispatch(ctx: Context) -> Result[Unit]:
     if decoded is None:
         # Validate 阶段的内置步骤总会先解码；没有解码结果时同样按规则 2 解码，不让处理器拿到未解码的载荷
         request = request_of(ctx)
-        response = await descriptor.execute(ctx, b"" if request is None else request.payload)
-    else:
-        response = await descriptor._execute(ctx, decoded.value)
-    if response.outcome.is_ok:
-        ctx.set_item(_RESPONSE, response.payload)
-    return response.outcome
+        value, invalid = descriptor.decode(b"" if request is None else request.payload)
+        if invalid is not None:
+            return fail(invalid)
+        decoded = _Box(value)
+    result = await descriptor._handler(ctx, decoded.value)
+    if result.error is not None:
+        return fail(result.error)
+    ctx.set_item(_PRODUCED, _Box(result.value))
+    return success()
+
+
+def _unhandled(id: str | None, exception: Exception, message: str) -> Error:
+    """未处理的异常（RFC-0011 规则 5、10）：完整异常经 ``logging`` 记下，上线的错误不带异常文本，框架异常的错误放进 ``inner``。"""
+    _logger.error(message, id, exc_info=exception)
+    inner = exception.to_error() if isinstance(exception, FrameworkError) else None
+    return Error.unexpected(ERROR_CODE_UNEXPECTED, MESSAGE_UNHANDLED_EXCEPTION, None, inner)
 
 
 def _no_response(id: str) -> Error:

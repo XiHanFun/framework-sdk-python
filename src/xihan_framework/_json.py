@@ -124,13 +124,14 @@ def member_path(path: str, name: str) -> str:
     return f"{path}.{name}"
 
 
-def dumps(value: JsonValue, *, indent: bool = False) -> str:
+def dumps(value: JsonValue, *, indent: bool = False, strict: bool = False) -> str:
     """写出 JSON：紧凑形式，或两个空格缩进、LF 换行、``": "`` 分隔、空容器写 ``[]`` / ``{}`` 的缩进形式。
 
-    对象成员按给定的顺序；数字与字符串的写法见模块说明，``JsonNumber`` 写回它的原文。
+    对象成员按给定的顺序；数字与字符串的写法见模块说明，``JsonNumber`` 写回它的原文。``strict`` 用于响应编码
+    （RFC-0011 规则 10 的「编码」）：非有限的浮点写不出，抛出 ``ValueError``，不写成字符串或 ``null``。
     """
     parts: list[str] = []
-    _write(value, parts, 0 if indent else None)
+    _write(value, parts, 0 if indent else None, strict)
     return "".join(parts)
 
 
@@ -214,8 +215,8 @@ def _escape(match: re.Match[str]) -> str:
     return short if short is not None else f"\\u{ord(found):04x}"
 
 
-def _write(value: JsonValue, parts: list[str], depth: int | None) -> None:
-    """递归写出一个值；``depth`` 为空表示紧凑形式。"""
+def _write(value: JsonValue, parts: list[str], depth: int | None, strict: bool) -> None:
+    """递归写出一个值；``depth`` 为空表示紧凑形式，``strict`` 时非有限的浮点写不出。"""
     if value is None:
         parts.append("null")
     elif value is True:
@@ -226,31 +227,33 @@ def _write(value: JsonValue, parts: list[str], depth: int | None) -> None:
         if INT64_MIN <= value <= INT64_MAX:
             parts.append(str(value))
         else:
-            _write_float(int_to_float(value), parts)
+            _write_float(int_to_float(value), parts, strict)
     elif isinstance(value, JsonNumber):
         parts.append(value.text)
     elif isinstance(value, float):
-        _write_float(value, parts)
+        _write_float(value, parts, strict)
     elif isinstance(value, str):
         parts.append(quote(value))
     elif isinstance(value, Mapping):
-        _write_members(list(value.items()), parts, depth)
+        _write_members(list(value.items()), parts, depth, strict)
     elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
-        _write_elements(list(value), parts, depth)
+        _write_elements(list(value), parts, depth, strict)
     else:
         raise TypeError(f"The value of type '{type(value).__name__}' is not a JSON value.")
 
 
-def _write_float(value: float, parts: list[str]) -> None:
-    """浮点：整数值的写成带 ``.0`` 的写法，让对方读回浮点；非有限的写成字符串。"""
+def _write_float(value: float, parts: list[str], strict: bool) -> None:
+    """浮点：整数值的写成带 ``.0`` 的写法，让对方读回浮点；非有限的写成字符串，``strict`` 时写不出。"""
     if not math.isfinite(value):
+        if strict:
+            raise ValueError(f"The number {number_text(value)} cannot be written as JSON.")
         parts.append(quote(number_text(value)))
         return
     text = number_text(value)
     parts.append(text if "." in text or "E" in text else text + ".0")
 
 
-def _write_members(members: list[tuple[str, JsonValue]], parts: list[str], depth: int | None) -> None:
+def _write_members(members: list[tuple[str, JsonValue]], parts: list[str], depth: int | None, strict: bool) -> None:
     """写出对象成员，顺序按给定的顺序。"""
     if not members:
         parts.append("{}")
@@ -264,12 +267,12 @@ def _write_members(members: list[tuple[str, JsonValue]], parts: list[str], depth
         _newline(parts, depth, 1)
         parts.append(quote(name))
         parts.append(":" if depth is None else ": ")
-        _write(member, parts, None if depth is None else depth + 1)
+        _write(member, parts, None if depth is None else depth + 1, strict)
     _newline(parts, depth, 0)
     parts.append("}")
 
 
-def _write_elements(elements: list[JsonValue], parts: list[str], depth: int | None) -> None:
+def _write_elements(elements: list[JsonValue], parts: list[str], depth: int | None, strict: bool) -> None:
     """写出数组元素。"""
     if not elements:
         parts.append("[]")
@@ -279,7 +282,7 @@ def _write_elements(elements: list[JsonValue], parts: list[str], depth: int | No
         if index:
             parts.append(",")
         _newline(parts, depth, 1)
-        _write(element, parts, None if depth is None else depth + 1)
+        _write(element, parts, None if depth is None else depth + 1, strict)
     _newline(parts, depth, 0)
     parts.append("]")
 

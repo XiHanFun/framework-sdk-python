@@ -41,6 +41,7 @@ from xihan_framework.operation._operation import (
     decoded_request_of,
     is_id,
     request_of,
+    response_of,
     response_payload_of,
 )
 
@@ -82,5 +83,6 @@ __all__ = [
     "is_id",
     "json_field",
     "request_of",
+    "response_of",
     "response_payload_of",
 ]
