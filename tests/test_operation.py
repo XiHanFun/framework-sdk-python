@@ -380,3 +380,26 @@ def test_payload_reasons_follow_the_vectors(vector: Callable[[str, str], Any]) -
     assert (
         invoke(invoker, Request("orders.place", b'{"lines":[{"quantity":2}]}')).payload == b'{"lines":[{"quantity":2}]}'
     )
+
+
+def test_deadlines_already_past_end_the_call_before_the_first_middleware() -> None:
+    # RFC-0011 规则 10（ADR-0235）：没有截止时间中间件的 SDK 由调用器在第一个中间件之前按时钟核对，构造上下文时不判断
+    seen: list[str] = []
+
+    async def observe(ctx: Context, next_step: Step) -> Result[Unit]:
+        seen.append("observe")
+        return await next_step(ctx)
+
+    invoker = new_invoker(Builder().use_at(pipeline.func("Observe", observe), PipelineStage.OBSERVE))
+    expired = Context(timeout=-1)
+    assert expired.cancellation_error() is not None, "constructing an expired context does not fail"
+    raw = error_of(invoke(invoker, Request("orders.create", b'{"quantity":1}'), expired))
+    typed = asyncio.run(
+        invoker.invoke_typed(Context(timeout=-1), "orders.create", CreateOrder(quantity=1), OrderCreated)
+    )
+    for error in [raw, typed.error]:
+        assert error is not None
+        assert error.code == ERROR_CODE_DEADLINE_EXCEEDED
+        assert error.message_key == "kernel.invocation.deadline_before_start"
+        assert error.message == "The invocation exceeded its deadline before it started."
+    assert seen == []
