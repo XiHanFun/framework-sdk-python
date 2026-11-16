@@ -1,12 +1,25 @@
 """``xihan.manifest.json`` 的模型（RFC-0002，Schema 见 ``spec/manifest/manifest.schema.json``）。
 
-只做数据与格式校验；收集、解析与求解是宿主的职责。``read`` / ``read_file`` 解析并校验，``write`` 输出与 Go SDK
-逐字节相同的规范化 JSON；``Manifest`` 是冻结的 dataclass，构造时即校验，不存在不合法的实例。
+只做数据与格式校验；收集、解析与求解是宿主的职责。``read`` / ``read_file`` 按 RFC-0002 解析规则 2 的顺序读取，
+失败返回 ``KERNEL_CAPABILITY_006`` 的失败结果，``reason`` 是路径；``write`` 按 RFC-0002「写出」的排版输出，各语言逐字
+相同。``Manifest`` 是冻结的 dataclass，构造时校验各字段的格式，字段之间的约束由 ``validate`` 核对。
 """
 
 from xihan_framework.manifest._manifest import (
+    ERROR_CODE_INVALID_MANIFEST,
     FILE_NAME,
+    MAX_INTERFACE_VERSION,
+    MESSAGE_DUPLICATE_BINDINGS,
+    MESSAGE_DUPLICATE_PROVIDES,
+    MESSAGE_DUPLICATE_REQUIRES,
+    MESSAGE_EMPTY,
+    MESSAGE_FILE_MISSING,
+    MESSAGE_INVALID,
+    MESSAGE_INVALID_JSON,
+    MESSAGE_ISOLATION_NOT_ALLOWED,
+    MESSAGE_ISOLATION_REQUIRED,
     ON_STARTUP,
+    SCHEMA_URI,
     Binding,
     CapabilityDeclaration,
     CapabilityRequirement,
@@ -19,6 +32,7 @@ from xihan_framework.manifest._manifest import (
     Role,
     domain,
     is_capability_id,
+    is_interface_version,
     is_manifest_id,
     read,
     read_file,
@@ -26,8 +40,20 @@ from xihan_framework.manifest._manifest import (
 )
 
 __all__ = [
+    "ERROR_CODE_INVALID_MANIFEST",
     "FILE_NAME",
+    "MAX_INTERFACE_VERSION",
+    "MESSAGE_DUPLICATE_BINDINGS",
+    "MESSAGE_DUPLICATE_PROVIDES",
+    "MESSAGE_DUPLICATE_REQUIRES",
+    "MESSAGE_EMPTY",
+    "MESSAGE_FILE_MISSING",
+    "MESSAGE_INVALID",
+    "MESSAGE_INVALID_JSON",
+    "MESSAGE_ISOLATION_NOT_ALLOWED",
+    "MESSAGE_ISOLATION_REQUIRED",
     "ON_STARTUP",
+    "SCHEMA_URI",
     "Binding",
     "CapabilityDeclaration",
     "CapabilityRequirement",
@@ -40,6 +66,7 @@ __all__ = [
     "Role",
     "domain",
     "is_capability_id",
+    "is_interface_version",
     "is_manifest_id",
     "read",
     "read_file",
