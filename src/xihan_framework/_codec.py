@@ -8,8 +8,10 @@ dataclass 按字段声明顺序写成对象（名字可由 ``json_field`` 改写
 按 RFC-0011 规则 2 的语义解码（ADR-0236）：对象的成员按文本顺序逐个解码，第一处不符即抛出 ``DecodeError``，只带
 JSON 路径（``$.quantity``）而不带类型名；必填成员（没有缺省值的字段）缺少时，在对象的成员都解码完之后报该对象的路径，
 值为 ``null`` 也算出现；未知成员忽略，成员名区分大小写。``int`` 是 64 位有符号整数，不接受 ``1.0``、``1e2`` 与超出范围的
-整数；``float`` 也接受整数写法；数字不从字符串读，布尔不是数字。只有 ``X | None``、``Maybe``、``JsonValue`` / ``Any``
-接受 ``null``，其余类型（含 ``str``、``list``、dataclass）遇到 ``null`` 即不符。
+整数，``Annotated[int, Int32]`` 等 ``IntRange`` 收窄范围；``float`` 也接受整数写法，得到普通的 ``float``；数字不从
+字符串读，布尔不是数字。``JsonValue`` / ``Any`` 原样交出读到的值，载荷里的数字保留原文（``JsonNumber``）。只有
+``X | None``、``Maybe``、``JsonValue`` / ``Any`` 接受 ``null``，其余类型（含 ``str``、``list``、dataclass）遇到 ``null``
+即不符。
 
 支持 ``bool`` / ``int`` / ``float`` / ``str`` / ``None``、``X | None``、``Literal``、``Annotated``、``list`` /
 ``Sequence`` / ``tuple``、键为 ``str`` 的 ``dict`` / ``Mapping``、dataclass、枚举、``TypedId`` 子类、``Maybe``、
@@ -20,10 +22,11 @@ JSON 路径（``$.quantity``）而不带类型名；必填成员（没有缺省�
 import dataclasses
 import types
 from collections.abc import Callable, Mapping, MutableSequence, Sequence
+from dataclasses import dataclass
 from enum import Enum
 from typing import Annotated, Any, Final, Literal, TypeAliasType, Union, get_args, get_origin, get_type_hints
 
-from xihan_framework._json import INT64_MAX, INT64_MIN, JsonValue, member_path
+from xihan_framework._json import INT64_MAX, INT64_MIN, JsonNumber, JsonValue, member_path
 from xihan_framework.primitives._id import TypedId
 from xihan_framework.primitives._maybe import Maybe
 from xihan_framework.primitives._result import Result, Unit
@@ -34,6 +37,27 @@ JSON_NAME: Final = "xihan.json.name"
 JSON_OMIT_NONE: Final = "xihan.json.omit_none"
 
 type Decoder = Callable[[JsonValue, str], object]
+
+
+@dataclass(frozen=True, slots=True)
+class IntRange:
+    """整数的取值范围，写在 ``Annotated[int, ...]`` 里；超出范围即类型不符，报该值的路径（RFC-0011 规则 2）。
+
+    Python 只有一种整数，``int`` 按 64 位有符号整数核对；更窄的整数类型（C# 的 ``int``、Go 的 ``int32``）用它声明，
+    如 ``Annotated[int, Int32]``。
+    """
+
+    minimum: int
+    maximum: int
+
+    def __post_init__(self) -> None:
+        """范围必须落在 64 位有符号整数之内且不为空。"""
+        if not INT64_MIN <= self.minimum <= self.maximum <= INT64_MAX:
+            raise ValueError(f"The integer range {self.minimum}..{self.maximum} is not within the 64-bit range.")
+
+
+#: 32 位有符号整数：``Annotated[int, Int32]``。
+Int32: Final = IntRange(-(2**31), 2**31 - 1)
 
 
 class DecodeError(Exception):
@@ -117,7 +141,7 @@ def _compile(target: object, cache: dict[object, Decoder]) -> Decoder:
         return _null
     origin, arguments = get_origin(target), get_args(target)
     if origin is Annotated:
-        return _compile(arguments[0], cache)
+        return _compile_annotated(target, arguments[0], cache)
     if origin is Union or origin is types.UnionType:
         return _compile_optional(target, arguments, cache)
     if origin is Literal:
@@ -197,12 +221,31 @@ def _compile_optional(target: object, arguments: tuple[object, ...], cache: dict
     return decode
 
 
+def _compile_annotated(target: object, base: object, cache: dict[object, Decoder]) -> Decoder:
+    """``Annotated[X, ...]``：按 ``X`` 解码；元数据里的 ``IntRange`` 只能用在 ``int`` 上，再核对范围。"""
+    ranges = [item for item in getattr(target, "__metadata__", ()) if isinstance(item, IntRange)]
+    if not ranges:
+        return _compile(base, cache)
+    if base is not int or len(ranges) > 1:
+        raise TypeError(f"The type '{target}' cannot be decoded from JSON; IntRange applies once to 'int'.")
+    bounds = ranges[0]
+
+    def decode(value: JsonValue, path: str) -> object:
+        number = _integer(value, path)
+        assert isinstance(number, int)
+        if not bounds.minimum <= number <= bounds.maximum:
+            raise DecodeError(path, f"the integer is outside {bounds.minimum}..{bounds.maximum}")
+        return number
+
+    return decode
+
+
 def _compile_literal(arguments: tuple[object, ...]) -> Decoder:
     """``Literal[...]``：值与类型都要与某个字面量相同（``True`` 不等于 ``1``）。"""
 
     def decode(value: JsonValue, path: str) -> object:
         for allowed in arguments:
-            if type(value) is type(allowed) and value == allowed:
+            if type(_plain(value)) is type(allowed) and value == allowed:
                 return value
         raise DecodeError(path, "the value is not one of the allowed literals")
 
@@ -349,7 +392,7 @@ def _compile_enum(target: type[Enum]) -> Decoder:
 
     def decode(value: JsonValue, path: str) -> object:
         for member in members:
-            if type(member.value) is type(value) and member.value == value:
+            if type(member.value) is type(_plain(value)) and member.value == value:
                 return member
         raise DecodeError(path, f"the value is not a member of '{target.__qualname__}'")
 
@@ -391,6 +434,11 @@ def _compile_dataclass(target: type, cache: dict[object, Decoder]) -> Decoder:
             raise DecodeError(path, str(error)) from error
 
     return decode
+
+
+def _plain(value: JsonValue) -> JsonValue:
+    """保留原文的数字按它的浮点值比较类型。"""
+    return float(value) if isinstance(value, JsonNumber) else value
 
 
 def _identity(value: JsonValue, path: str) -> object:

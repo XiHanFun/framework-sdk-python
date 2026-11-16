@@ -216,10 +216,11 @@ class Descriptor:
 
         空载荷等价于 ``{}``。先过共同的 JSON 读取检查：语法错误（含只有空白、BOM、嵌套超过 64 层、非法 UTF-8、孤立的
         代理项）的 ``reason`` 写 ``$``，任何一层有重复成员时写第一处重复的路径；再按请求类型解码，``reason`` 是第一处
-        不符的路径，缺少必填成员时是所在对象的路径；载荷是 ``null`` 或不是对象时写 ``$``。
+        不符的路径，缺少必填成员时是所在对象的路径；载荷是 ``null`` 或不是对象时写 ``$``。任意 JSON 类型的成员原样保留
+        读到的数字（``JsonNumber``），写回时与读到的 JSON 值相等。
         """
         try:
-            value: JsonValue = parse(payload or b"{}")
+            value: JsonValue = parse(payload or b"{}", exact=True)
         except JsonTextError as error:
             return None, self._invalid_payload(error.path)
         try:

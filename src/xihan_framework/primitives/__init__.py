@@ -4,7 +4,7 @@
 零行为、零依赖、只增不改；语义与线上编码以规范为准、与 .NET 参考实现一致，由 framework-spec 的一致性向量验证。
 """
 
-from xihan_framework._json import JsonValue
+from xihan_framework._json import JsonNumber, JsonValue
 from xihan_framework.primitives._baggage import (
     BAGGAGE_CORRELATION,
     BAGGAGE_IDEMPOTENCY_KEY,
@@ -100,6 +100,7 @@ __all__ = [
     "Catalog",
     "Error",
     "FrameworkError",
+    "JsonNumber",
     "JsonValue",
     "LifecycleState",
     "Maybe",

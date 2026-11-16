@@ -48,6 +48,33 @@ _QUOTED = re.compile(
 _QUOTE_ESCAPES: Final = {'"': '\\"', "\\": "\\\\", "\b": "\\b", "\f": "\\f", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
 
 
+class JsonNumber(float):
+    """读到的数字原文：任意 JSON 类型的成员原样保留数字（RFC-0011 规则 2，ADR-0236）。
+
+    它是 ``float``，值是原文最接近的双精度浮点（``1e400`` 为无穷），可以照常参与运算；``text`` 是读到的写法，写出时
+    原样写回，所以 ``1e400``、超出双精度的整数与 ``2.0`` 都与读到的 JSON 值相等，不变成 ``null``、无穷或近似值。
+    载荷按 ``parse(..., exact=True)`` 读时，64 位范围以外的整数与带小数点或指数的数字都是它。
+    """
+
+    __slots__ = ("text",)
+
+    text: str
+
+    def __new__(cls, text: str) -> "JsonNumber":
+        """用 JSON 数字的原文创建；不是 JSON 数字抛出 ``ValueError``。"""
+        if _NUMBER.fullmatch(text) is None:
+            raise ValueError(f"'{text}' is not a JSON number.")
+        number = super().__new__(cls, text)
+        number.text = text
+        return number
+
+    def __repr__(self) -> str:
+        """``JsonNumber('1e400')``。"""
+        return f"JsonNumber({self.text!r})"
+
+    __str__ = float.__repr__
+
+
 class JsonTextError(ValueError):
     """JSON 文本没有通过共同检查。
 
@@ -62,11 +89,12 @@ class JsonTextError(ValueError):
         self.path = path
 
 
-def parse(text: str | bytes) -> JsonValue:
+def parse(text: str | bytes, *, exact: bool = False) -> JsonValue:
     """过共同检查并读出 JSON 值；不通过抛出 ``JsonTextError``。
 
     字节按 UTF-8 解码，非法的 UTF-8（含过长编码与编码成 UTF-8 的代理项）是语法错误；开头的 BOM 不跳过，是语法错误。
-    字符串里的代理项码点同样是语法错误。对象读成按文本顺序的 ``dict``，数组读成 ``list``，数字按值模型。
+    字符串里的代理项码点同样是语法错误。对象读成按文本顺序的 ``dict``，数组读成 ``list``，数字按值模型；``exact``
+    时 64 位范围以外的整数与带小数点或指数的数字读成保留原文的 ``JsonNumber``（操作载荷用）。
     """
     if isinstance(text, (bytes, bytearray, memoryview)):
         try:
@@ -75,7 +103,7 @@ def parse(text: str | bytes) -> JsonValue:
             raise JsonTextError(True, "$") from None
     elif _SURROGATE.search(text) is not None:
         raise JsonTextError(True, "$")
-    reader = _Reader(text)
+    reader = _Reader(text, exact)
     try:
         value = reader.document()
     except _SyntaxError:
@@ -99,7 +127,7 @@ def member_path(path: str, name: str) -> str:
 def dumps(value: JsonValue, *, indent: bool = False) -> str:
     """写出 JSON：紧凑形式，或两个空格缩进、LF 换行、``": "`` 分隔、空容器写 ``[]`` / ``{}`` 的缩进形式。
 
-    对象成员按给定的顺序；数字与字符串的写法见模块说明。
+    对象成员按给定的顺序；数字与字符串的写法见模块说明，``JsonNumber`` 写回它的原文。
     """
     parts: list[str] = []
     _write(value, parts, 0 if indent else None)
@@ -199,6 +227,8 @@ def _write(value: JsonValue, parts: list[str], depth: int | None) -> None:
             parts.append(str(value))
         else:
             _write_float(int_to_float(value), parts)
+    elif isinstance(value, JsonNumber):
+        parts.append(value.text)
     elif isinstance(value, float):
         _write_float(value, parts)
     elif isinstance(value, str):
@@ -267,11 +297,12 @@ class _SyntaxError(Exception):
 class _Reader:
     """按 RFC 8259 读一段文本，边读边记下第一处重复成员；语法错误读到末尾之前也优先。"""
 
-    __slots__ = ("duplicate", "text")
+    __slots__ = ("duplicate", "exact", "text")
 
-    def __init__(self, text: str) -> None:
-        """用整段文本创建。"""
+    def __init__(self, text: str, exact: bool) -> None:
+        """用整段文本创建；``exact`` 时值模型之外的数字保留原文。"""
         self.text = text
+        self.exact = exact
         self.duplicate: str | None = None
 
     def document(self) -> JsonValue:
@@ -315,7 +346,7 @@ class _Reader:
             number = int(literal)
             if INT64_MIN <= number <= INT64_MAX:
                 return number, match.end()
-        return float(literal), match.end()
+        return (JsonNumber(literal) if self.exact else float(literal)), match.end()
 
     def _object(self, index: int, depth: int, path: str) -> tuple[JsonValue, int]:
         """读对象的成员，成员名重复时记下第一处。"""

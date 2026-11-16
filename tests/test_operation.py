@@ -1,17 +1,20 @@
 """operation 的测试：Go SDK 移植来的调用、类型化调用与登记表用例，以及容量、载荷错误、超时与取消。"""
 
 import asyncio
+import json
+import math
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from decimal import Decimal
+from typing import Annotated, Any
 
 import pytest
 
 from xihan_framework import operation, pipeline
-from xihan_framework._json import JsonValue
+from xihan_framework._json import JsonNumber, JsonValue
 from xihan_framework.invocation import ERROR_CODE_CANCELLED, ERROR_CODE_DEADLINE_EXCEEDED, Cancellation, Context
-from xihan_framework.operation import Contract, Invoker, Registry, Request, Response, Schema, json_field
+from xihan_framework.operation import Contract, Int32, Invoker, Registry, Request, Response, Schema, json_field
 from xihan_framework.pipeline import Builder, Step
 from xihan_framework.primitives import (
     BAGGAGE_CORRELATION,
@@ -351,7 +354,7 @@ def test_unhandled_exceptions_become_unexpected_errors(caplog: pytest.LogCapture
 
 @dataclass(frozen=True)
 class ReasonLine:
-    quantity: int = 0
+    quantity: Annotated[int, Int32] = 0
 
 
 @dataclass(frozen=True)
@@ -380,16 +383,23 @@ class ReasonProfile:
 
 
 def test_payload_reasons_follow_the_vectors(vector: Callable[[str, str], Any]) -> None:
-    # 向量的三个请求类型：counts 是整数字典，order 是 { lines: [ { quantity: 整数 } ] }，profile 见上；reason 为 null 即解码成功
+    # 向量的三个请求类型：counts 是 32 位整数的字典，order 是 { lines: [ { quantity: 32 位整数 } ] }，profile 见上；
+    # reason 为 null 即解码成功。处理器不回写请求：profile 的 ratio 可以是无穷，类型化的浮点无穷写不出
     vectors = vector("operations", "payload-reasons")
     registry = Registry()
+    decoded: list[object] = []
 
-    async def echo(ctx: Context, request: object) -> Result[object]:
-        return ok(request)
+    async def accept(ctx: Context, request: object) -> Result[Empty]:
+        decoded.append(request)
+        return ok(Empty())
 
-    types: dict[str, Any] = {"counts": dict[str, int], "order": ReasonOrder, "profile": ReasonProfile}
+    types: dict[str, Any] = {
+        "counts": dict[str, Annotated[int, Int32]],
+        "order": ReasonOrder,
+        "profile": ReasonProfile,
+    }
     for name, request_type in types.items():
-        registry.add(Contract(f"{name}.check"), echo, request_type=request_type, response_type=request_type)
+        registry.add(Contract(f"{name}.check"), accept, request_type=request_type, response_type=Empty)
     invoker = Invoker(registry)
     for case in vectors["cases"]:
         id = f"{case['request']}.check"
@@ -401,14 +411,54 @@ def test_payload_reasons_follow_the_vectors(vector: Callable[[str, str], Any]) -
         assert error.code == operation.ERROR_CODE_INVALID_PAYLOAD, case["name"]
         assert error.message_key == operation.MESSAGE_INVALID_PAYLOAD
         assert error.details == {"id": id, "reason": case["reason"]}, case["name"]
-    assert (
-        invoke(invoker, Request("order.check", b'{"lines":[{"quantity":2}]}')).payload == b'{"lines":[{"quantity":2}]}'
+    decoded.clear()
+    invoke(invoker, Request("profile.check", b'{"name":null,"ratio":5,"tags":["x",null]}'))
+    invoke(invoker, Request("counts.check", b'{"a":-2147483648}'))
+    assert decoded == [ReasonProfile(name=None, ratio=5.0, tags=["x", None]), {"a": -(2**31)}]
+    profile = decoded[0]
+    assert isinstance(profile, ReasonProfile)
+    assert type(profile.ratio) is float, "typed floats are plain floats"
+
+
+@dataclass(frozen=True)
+class Holder:
+    meta: JsonValue = None
+
+
+def _exact(payload: bytes) -> object:
+    """按 JSON 值读，数字保留精确值并区分整数写法与带小数点或指数的写法。"""
+    return json.loads(
+        payload, parse_int=lambda text: ("integer", int(text)), parse_float=lambda text: ("number", Decimal(text))
     )
-    profile = invoke(invoker, Request("profile.check", b'{"name":null,"ratio":5,"tags":["x",null]}')).payload
-    assert profile == (
-        b'{"name":null,"note":null,"count":0,"ratio":5.0,"flag":false,"tags":["x",null],"scores":null,'
-        b'"inner":null,"meta":null}'
+
+
+def test_arbitrary_json_members_keep_the_numbers_they_read() -> None:
+    # RFC-0011 规则 2（ADR-0236）：任意 JSON 类型的成员原样保留读到的值，写回时 JSON 值相等，1e400 不变成 null 或无穷，
+    # 超出双精度的整数保持精确，2.0 与 2 的区别保留
+    seen: list[JsonValue] = []
+    registry = Registry()
+
+    async def echo(ctx: Context, request: Holder) -> Result[Holder]:
+        seen.append(request.meta)
+        return ok(request)
+
+    registry.add(Contract("holders.echo"), echo, request_type=Holder, response_type=Holder)
+    payload = (
+        b'{"meta":{"big":1e400,"exact":9007199254740993,"huge":123456789012345678901234567890,'
+        b'"float":2.0,"int":2,"tiny":1e-400,"digits":0.123456789012345678901234567890,"list":[1.50,-0.0,1E+2]}}'
     )
+    response = invoke(Invoker(registry), Request("holders.echo", payload))
+    assert response.payload is not None
+    assert _exact(response.payload) == _exact(payload)
+    meta = seen[0]
+    assert isinstance(meta, dict)
+    big = meta["big"]
+    assert isinstance(big, JsonNumber)
+    assert (big.text, math.isinf(big)) == ("1e400", True)
+    assert meta["exact"] == 9007199254740993
+    assert type(meta["int"]) is int
+    assert isinstance(meta["float"], JsonNumber)
+    assert meta["float"] == 2.0
 
 
 def test_built_in_steps_sit_where_the_dotnet_middleware_does() -> None:

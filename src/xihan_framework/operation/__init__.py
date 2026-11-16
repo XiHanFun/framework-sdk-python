@@ -5,7 +5,7 @@
 （``ObserveMiddleware``、``DeadlineMiddleware``、``ValidationMiddleware``，见 ``Invoker``）。
 """
 
-from xihan_framework._codec import json_field
+from xihan_framework._codec import Int32, IntRange, json_field
 from xihan_framework.operation._operation import (
     CAPACITY,
     DEADLINE_MIDDLEWARE,
@@ -70,6 +70,8 @@ __all__ = [
     "Contract",
     "Descriptor",
     "Handler",
+    "Int32",
+    "IntRange",
     "Invoker",
     "Registry",
     "Request",

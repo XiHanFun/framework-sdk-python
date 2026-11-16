@@ -7,7 +7,8 @@ from typing import Annotated, Any, Literal
 import pytest
 
 from xihan_framework import _json
-from xihan_framework._codec import DecodeError, compile_decoder, encode, json_field
+from xihan_framework._codec import DecodeError, Int32, IntRange, compile_decoder, encode, json_field
+from xihan_framework._json import JsonNumber
 from xihan_framework.primitives import (
     Error,
     JsonValue,
@@ -188,3 +189,46 @@ def test_encoding_rejects_values_without_a_json_form() -> None:
         encode({1: "a"})
     with pytest.raises(ValueError, match="empty"):
         json_field("")
+
+
+def test_int_ranges_narrow_integers() -> None:
+    # Python 只有一种整数：更窄的整数类型用 Annotated[int, IntRange] 声明（RFC-0011 规则 2，ADR-0236）
+    assert decode(Annotated[int, Int32], 2**31 - 1) == 2**31 - 1
+    assert decode(Annotated[int, Int32], -(2**31)) == -(2**31)
+    values: list[JsonValue] = [2**31, -(2**31) - 1, 1.5, True, "1"]
+    for value in values:
+        with pytest.raises(DecodeError) as raised:
+            decode(dict[str, Annotated[int, Int32]], {"a": value})
+        assert raised.value.path == "$.a", value
+    assert decode(Annotated[int, IntRange(0, 255)], 255) == 255
+    for target in [Annotated[str, Int32], Annotated[int, Int32, Int32]]:
+        with pytest.raises(TypeError):
+            compile_decoder(target)
+    for bounds in [(1, 0), (0, 2**63)]:
+        with pytest.raises(ValueError, match="64-bit"):
+            IntRange(*bounds)
+
+
+def test_exact_payloads_keep_number_texts() -> None:
+    # 任意 JSON 的数字保留原文：值是最接近的双精度浮点，写出时原样写回（RFC-0011 规则 2）
+    value = _json.parse("[1e400,2.0,9223372036854775808,3,-0.0]", exact=True)
+    assert isinstance(value, list)
+    big, two, huge, three, _zero = value
+    assert isinstance(big, JsonNumber)
+    assert big.text == "1e400"
+    assert big == float("inf")
+    assert isinstance(two, JsonNumber)
+    assert two == 2.0
+    assert isinstance(huge, JsonNumber)
+    assert huge.text == "9223372036854775808"
+    assert type(three) is int
+    assert repr(big) == "JsonNumber('1e400')"
+    assert str(two) == "2.0"
+    assert _json.dumps(value) == "[1e400,2.0,9223372036854775808,3,-0.0]"
+    with pytest.raises(ValueError, match="not a JSON number"):
+        JsonNumber("1.")
+    # 按类型解码时取它的浮点值，Literal 与枚举按值比较
+    assert type(decode(float, two)) is float
+    assert decode(Literal[2.0], two) == 2.0
+    with pytest.raises(DecodeError):
+        decode(int, huge)
