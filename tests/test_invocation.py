@@ -304,7 +304,7 @@ def test_cancellation_converted_to_another_exception_keeps_the_count_balanced() 
     assert asyncio.run(main()) == 0
 
 
-def test_contexts_drop_unacceptable_baggage_values(vector: Callable[[str, str], Any]) -> None:
+def test_contexts_drop_external_baggage_but_reject_derived_values(vector: Callable[[str, str], Any]) -> None:
     values = vector("primitives", "baggage-keys")["values"]
     for value in values["acceptable"]:
         assert Context(baggage={BAGGAGE_TENANT: value}).tenant == value
@@ -315,8 +315,13 @@ def test_contexts_drop_unacceptable_baggage_values(vector: Callable[[str, str], 
         # 幂等键不按这条丢弃，交给 Idempotency 阶段拒绝；未登记的键不出进程，也不受约束
         assert ctx.idempotency_key == value
         assert ctx.baggage["xihan.note"] == value
-        derived = Context(baggage={BAGGAGE_CORRELATION: "c1"}).with_baggage(BAGGAGE_CORRELATION, value)
-        assert derived.correlation == "c1", value
+        # 程序内逐项派生给已登记键一个不合的值是编程错误：抛出，不静默丢弃也不保留原值（ADR-0235）
+        with pytest.raises(FrameworkError) as raised:
+            Context(baggage={BAGGAGE_CORRELATION: "c1"}).with_baggage(BAGGAGE_CORRELATION, value)
+        assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT, value
+        assert isinstance(raised.value, ValueError)
+        assert Context().with_baggage(BAGGAGE_IDEMPOTENCY_KEY, value).idempotency_key == value
+        assert Context().with_baggage("xihan.note", value).baggage["xihan.note"] == value
 
 
 def test_trace_context_follows_the_vectors(vector: Callable[[str, str], Any]) -> None:

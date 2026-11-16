@@ -17,6 +17,7 @@ from xihan_framework.primitives import (
     BAGGAGE_PRINCIPAL,
     BAGGAGE_TENANT,
     ERROR_CODE_INVALID_ARGUMENT,
+    MAX_BAGGAGE_VALUE_LENGTH,
     Error,
     FrameworkError,
     Result,
@@ -263,7 +264,7 @@ class Context:
         ``cancellation`` 省略时创建新的信号（经 ``cancellation`` 属性取得）；``deadline`` 是带时区的绝对时刻，
         ``timeout`` 是相对现在的时长（秒或 ``timedelta``），二者至多给一个。``trace_parent`` 是外部输入，
         不合法时当作没有给出；``trace_id`` / ``span_id`` 是调用方给的值，不合法即编程错误。没有追踪时生成新的 Trace ID
-        与 Span ID；``sampled`` 是上游的采样决定，``None`` 表示没有上游（RFC-0003 规则 7），写出时按已采样写 ``01``。Baggage 的键必须符合 ``xihan.<name>``；已登记键的值不合约束的成员丢弃
+        与 Span ID；``sampled`` 是上游的采样决定，``None`` 表示没有上游（RFC-0003 规则 7），写出时按已采样写 ``01``。Baggage 是外部输入：键必须符合 ``xihan.<name>``，已登记键的值不合约束的成员丢弃
         （``xihan.idempotency-key`` 除外，见 ``is_baggage_value_acceptable``）。
         """
         if deadline is not None and timeout is not None:
@@ -380,12 +381,18 @@ class Context:
     def with_baggage(self, key: str, value: str) -> Self:
         """派生一个多一个 Baggage 键值的上下文；键必须符合 ``xihan.<name>``。
 
-        已登记键的值不合约束（见 ``is_baggage_value_acceptable``）时丢弃这一成员，派生的上下文保留原来的 Baggage；
-        ``xihan.idempotency-key`` 例外，原样带上。
+        程序内逐项派生给已登记的键一个不合约束的值（见 ``is_baggage_value_acceptable``）是编程错误，抛出
+        ``FrameworkError``（``ValueError``，``PRIMITIVES_VALIDATION_001``），与键不合文法时一样，不静默丢弃也不保留原值
+        （conventions/baggage-keys.md，ADR-0235）；``xihan.idempotency-key`` 例外，原样带上。外部输入经构造函数进入，
+        在那里丢弃不合的成员。
         """
         _check_baggage_key(key)
         if not _admits(key, value):
-            return self._derive(dict(self._baggage))
+            raise FrameworkError(
+                ERROR_CODE_INVALID_ARGUMENT,
+                f"The value of the baggage key '{key}' must be non-empty, at most {MAX_BAGGAGE_VALUE_LENGTH} UTF-16 code "
+                "units long and free of control characters.",
+            )
         return self._derive({**self._baggage, key: value})
 
     def without_unregistered_baggage(self) -> Self:
