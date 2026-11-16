@@ -101,21 +101,23 @@ def test_constraints_only_move_what_they_must() -> None:
 
 
 def test_cycles_and_bad_constraints_are_rejected() -> None:
+    # 消息是与 .NET 逐字相同的英文原文（RFC-0004 规则 8，ADR-0236）
     cycle = (
         Builder()
         .use_at(passthrough("A"), PipelineStage.VALIDATE)
         .use_at(passthrough("B"), PipelineStage.VALIDATE)
+        .use_at(passthrough("C"), PipelineStage.VALIDATE)
         .before("A", "B")
         .before("B", "A")
     )
-    assert (
-        assert_code(cycle, pipeline.ERROR_CODE_CYCLE).message
-        == "the ordering constraints in stage 'validate' form a cycle"
+    assert assert_code(cycle, pipeline.ERROR_CODE_CYCLE).message == (
+        "Middleware ordering constraints in stage 'validate' form a cycle: 'A', 'B'."
     )
 
     unregistered = Builder().use_at(passthrough("A"), PipelineStage.VALIDATE).before("A", "Missing")
-    error = assert_code(unregistered, pipeline.ERROR_CODE_REGISTRATION)
-    assert error.message == "the ordering constraint references the unregistered middleware 'Missing'."
+    assert assert_code(unregistered, pipeline.ERROR_CODE_REGISTRATION).message == (
+        "The ordering constraint of middleware 'A' references unregistered middleware 'Missing'."
+    )
 
     cross_stage = (
         Builder()
@@ -123,21 +125,43 @@ def test_cycles_and_bad_constraints_are_rejected() -> None:
         .use_at(passthrough("B"), PipelineStage.EGRESS)
         .before("A", "B")
     )
-    assert_code(cross_stage, pipeline.ERROR_CODE_REGISTRATION)
+    assert assert_code(cross_stage, pipeline.ERROR_CODE_REGISTRATION).message == (
+        "Middleware 'A' (stage 'validate') and 'B' (stage 'egress') are not in the same stage, so no relative order "
+        "can be declared between them."
+    )
+
+    # 与 .NET 一样逐个阶段解析与排序：前一个阶段成环先于后一个阶段的目标未登记
+    both = (
+        Builder()
+        .use_at(passthrough("A"), PipelineStage.OBSERVE)
+        .use_at(passthrough("B"), PipelineStage.OBSERVE)
+        .use_at(passthrough("C"), PipelineStage.EGRESS)
+        .before("A", "B")
+        .after("A", "B")
+        .before("C", "Missing")
+    )
+    assert assert_code(both, pipeline.ERROR_CODE_CYCLE).message == (
+        "Middleware ordering constraints in stage 'observe' form a cycle: 'A', 'B'."
+    )
 
     # 重复登记在登记时立即报，不推迟到排序（RFC-0004 排序规则第 8 条）
     duplicate = Builder().use_at(passthrough("A"), PipelineStage.VALIDATE)
     with pytest.raises(FrameworkError) as raised:
         duplicate.use_at(passthrough("A"), PipelineStage.EGRESS)
     assert raised.value.code == pipeline.ERROR_CODE_REGISTRATION
+    assert raised.value.message == (
+        "Middleware 'A' is already registered; each middleware type may appear only once in a pipeline unless its "
+        "instances are named."
+    )
 
     with pytest.raises(FrameworkError) as raised:
         pipeline.parse_stage("middle")
     assert raised.value.code == pipeline.ERROR_CODE_UNKNOWN_STAGE
+    assert raised.value.message == "Unknown pipeline stage 'middle'."
     assert pipeline.parse_stage("handle") is PipelineStage.HANDLE
 
 
-def test_named_instances_are_distinct_but_ambiguous_for_type_constraints() -> None:
+def test_named_instances_are_referenced_by_their_names() -> None:
     builder = (
         Builder()
         .use_named_instance("guard-a", passthrough("Guard"), PipelineStage.OBSERVE, Placement.END, "xihan.plugins.a")
@@ -147,17 +171,25 @@ def test_named_instances_are_distinct_but_ambiguous_for_type_constraints() -> No
     descriptors = builder.describe()
     assert descriptors[0].instance == "guard-a"
     assert descriptors[0].owner == "xihan.plugins.a"
-    # 约束主体按名字有歧义时在声明时立即报（RFC-0004 排序规则第 8 条）；目标有歧义则在排序时报
+    # 与 .NET 的按名字约束相同：命名实例只按实例名引用，类型名对它们不算登记过
     builder.use_at(passthrough("Other"), PipelineStage.OBSERVE)
     with pytest.raises(FrameworkError) as raised:
         builder.before("Guard", "Other")
     assert raised.value.code == pipeline.ERROR_CODE_REGISTRATION
+    assert (
+        raised.value.message
+        == "Middleware 'Guard' is not registered, so no ordering constraint can be declared for it."
+    )
     builder.before("Other", "Guard")
-    assert_code(builder, pipeline.ERROR_CODE_REGISTRATION)
+    assert assert_code(builder, pipeline.ERROR_CODE_REGISTRATION).message == (
+        "The ordering constraint of middleware 'Other' references unregistered middleware 'Guard'."
+    )
     duplicate = Builder().use_named_instance("x", passthrough("Guard"), PipelineStage.OBSERVE)
     with pytest.raises(FrameworkError) as raised:
         duplicate.use_named_instance("x", passthrough("Guard"), PipelineStage.OBSERVE)
-    assert "'Guard[x]'" in raised.value.message
+    assert raised.value.message == (
+        "Middleware 'Guard' named 'x' is already registered; instance names must be unique within a type."
+    )
 
 
 def test_short_circuit_skips_downstream() -> None:
@@ -239,7 +271,7 @@ def test_middleware_exceptions_propagate() -> None:
 
 
 def test_constraints_may_name_instances() -> None:
-    # RFC-0004 排序规则第 7 条：有多个实例的类型按实例名约束，两端都可以是实例名或只登记一次的类型名
+    # RFC-0004 排序规则第 7 条：有多个实例的类型按实例名约束，两端都可以是实例名或默认实例的类型名
     builder = (
         Builder()
         .use_named_instance("guard-a", passthrough("Guard"), PipelineStage.OBSERVE, Placement.END, "xihan.plugins.a")
@@ -255,7 +287,11 @@ def test_constraints_may_name_instances() -> None:
         .use_at(passthrough("Tx"), PipelineStage.TRANSACTION)
         .before("guard-a", "Tx")
     )
-    assert_code(crossing, pipeline.ERROR_CODE_REGISTRATION)
+    assert assert_code(crossing, pipeline.ERROR_CODE_REGISTRATION).message == (
+        "Middleware 'Guard[guard-a]' (stage 'observe') and 'Tx' (stage 'transaction') are not in the same stage, so no "
+        "relative order can be declared between them."
+    )
+    # 一个名字既是默认实例的类型名又是另一个实例的名字：有歧义，作主体在声明时报，作目标在排序时报
     clash = (
         Builder()
         .use_at(passthrough("Audit"), PipelineStage.OBSERVE)
@@ -263,7 +299,11 @@ def test_constraints_may_name_instances() -> None:
         .use_at(passthrough("Other"), PipelineStage.OBSERVE)
         .before("Other", "Audit")
     )
-    assert "refers to more than one middleware" in assert_code(clash, pipeline.ERROR_CODE_REGISTRATION).message
+    ambiguous = "The middleware name 'Audit' matches several registrations, so ordering constraints by name are ambiguous for it."
+    assert assert_code(clash, pipeline.ERROR_CODE_REGISTRATION).message == ambiguous
+    with pytest.raises(FrameworkError) as raised:
+        clash.after("Audit", "Other")
+    assert raised.value.message == ambiguous
 
 
 def test_constraint_subjects_must_be_registered_when_declared() -> None:
@@ -303,19 +343,21 @@ def test_ordering_follows_the_vectors(vector: Callable[[str, str], Any]) -> None
     for case in vectors["errors"]:
         builder = Builder()
         raised_at: int | str | None = None
-        code = None
+        code = message = None
         for index, step in enumerate(case["steps"]):
             try:
                 _apply(builder, step)
             except FrameworkError as error:
-                raised_at, code = index, error.code
+                raised_at, code, message = index, error.code, error.message
                 break
         else:
             try:
                 builder.describe()
             except FrameworkError as error:
-                raised_at, code = "sort", error.code
+                raised_at, code, message = "sort", error.code, error.message
         assert (raised_at, code) == (case["at"], case["error"]), case["name"]
+        # 消息原文逐字相等，{type} 换成这里给命名实例用的类型名（ADR-0236）
+        assert message == case["message"].replace("{type}", TYPE_NAME), case["name"]
 
 
 def test_extend_appends_registrations_and_constraints() -> None:

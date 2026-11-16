@@ -1,7 +1,7 @@
 """固定阶段的执行管道（RFC-0004）：中间件按阶段贡献，排序确定、可打印、可测试。"""
 
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Final, Protocol, Self
 
@@ -95,28 +95,34 @@ class Descriptor:
         return self.middleware if self.instance is None else f"{self.middleware}[{self.instance}]"
 
 
-@dataclass(frozen=True, slots=True, eq=False)
+@dataclass(slots=True, eq=False)
 class _Registration:
-    """一次登记；``order`` 是登记序号，同一位置、同一归属时按它排。"""
+    """一次登记；``order`` 是登记序号，同一位置、同一归属时按它排。
+
+    ``before`` / ``after`` 是以它为主体的按名字约束（它排在这些名字之前 / 之后），与 .NET 一样挂在主体上，排序时
+    按基准次序逐个主体解析目标。
+    """
 
     middleware: Middleware
     descriptor: Descriptor
     order: int
+    before: list[str] = field(default_factory=list)
+    after: list[str] = field(default_factory=list)
 
 
 class Builder:
     """收集中间件与顺序约束，按规范排序后构建管道。
 
-    登记与约束在 ``describe`` / ``dump`` / ``build`` 时才解析，错误以 ``FrameworkError`` 抛出（``KERNEL_PIPELINE_00x``）。
-    ``build`` 返回的管道是当时登记内容的快照，之后的登记不影响它。
+    重复登记、未知阶段与约束主体的问题在登记时抛出，约束目标的问题与成环在 ``describe`` / ``dump`` / ``build`` 排序时
+    抛出（RFC-0004 排序规则第 8 条），都是 ``FrameworkError``（``KERNEL_PIPELINE_00x``），消息是与 .NET 逐字相同的英文
+    原文，按名字登记的实例写成 ``类型名[名字]``。``build`` 返回的管道是当时登记内容的快照，之后的登记不影响它。
     """
 
-    __slots__ = ("_constraints", "_registrations")
+    __slots__ = ("_registrations",)
 
     def __init__(self) -> None:
         """创建空的构建器。"""
         self._registrations: list[_Registration] = []
-        self._constraints: list[tuple[str, str]] = []
 
     def use(self, middleware: Middleware) -> Self:
         """登记中间件到 ``transaction`` 阶段末尾，归属 ``app``（RFC-0004 规则 1）。"""
@@ -148,17 +154,16 @@ class Builder:
     def before(self, middleware: str, other: str) -> Self:
         """约束 ``middleware`` 在 ``other`` 之前。
 
-        两端都是中间件名：按名字登记的实例名，或类型名（该类型只登记了一次时）。约束主体 ``middleware`` 在声明时必须
-        已登记，否则立即抛出 ``KERNEL_PIPELINE_003``；目标 ``other`` 在排序时解析（RFC-0004 排序规则第 7 条）。
+        两端都是中间件名：按名字登记的实例只按实例名引用，默认实例按类型名引用（与 .NET 的按名字约束相同）。约束主体
+        ``middleware`` 在声明时必须已登记且没有歧义，否则立即抛出 ``KERNEL_PIPELINE_003``；目标 ``other`` 在排序时解析
+        （RFC-0004 排序规则第 7、8 条）。
         """
-        self._check_subject(middleware)
-        self._constraints.append((middleware, other))
+        self._require(middleware).before.append(other)
         return self
 
     def after(self, middleware: str, other: str) -> Self:
         """约束 ``middleware`` 在 ``other`` 之后；名字的解析与 ``before`` 相同，约束主体 ``middleware`` 在声明时必须已登记。"""
-        self._check_subject(middleware)
-        self._constraints.append((other, middleware))
+        self._require(middleware).after.append(other)
         return self
 
     def extend(self, other: "Builder") -> Self:
@@ -169,8 +174,15 @@ class Builder:
         for registration in other._registrations:
             descriptor = registration.descriptor
             self._check_unique(descriptor)
-            self._registrations.append(_Registration(registration.middleware, descriptor, len(self._registrations)))
-        self._constraints.extend(other._constraints)
+            self._registrations.append(
+                _Registration(
+                    registration.middleware,
+                    descriptor,
+                    len(self._registrations),
+                    list(registration.before),
+                    list(registration.after),
+                )
+            )
         return self
 
     def describe(self) -> list[Descriptor]:
@@ -219,62 +231,91 @@ class Builder:
     def _check_unique(self, descriptor: Descriptor) -> None:
         """同一类型的默认实例只登记一次、命名实例的名字在类型内唯一；与 .NET 一样在登记时报，不推迟到排序。"""
         for registration in self._registrations:
-            if (registration.descriptor.middleware, registration.descriptor.instance) == (
-                descriptor.middleware,
-                descriptor.instance,
-            ):
-                raise _registration_error(f"the middleware '{descriptor.display}' is registered more than once")
+            existing = registration.descriptor
+            if (existing.middleware, existing.instance) != (descriptor.middleware, descriptor.instance):
+                continue
+            if descriptor.instance is None:
+                raise FrameworkError(
+                    ERROR_CODE_REGISTRATION,
+                    f"Middleware '{descriptor.middleware}' is already registered; each middleware type may appear only "
+                    "once in a pipeline unless its instances are named.",
+                )
+            raise FrameworkError(
+                ERROR_CODE_REGISTRATION,
+                f"Middleware '{descriptor.middleware}' named '{descriptor.instance}' is already registered; instance "
+                "names must be unique within a type.",
+            )
 
     def _sorted(self) -> list[_Registration]:
-        """按规则排序：先阶段；阶段内先位置，再归属，再登记顺序，最后按约束做稳定拓扑排序。"""
-        # 约束按中间件名（实例名或类型名）引用：未登记、一个名字对应多个中间件、跨阶段都是登记错误
-        resolved: list[tuple[_Registration, _Registration]] = []
-        for first_name, second_name in self._constraints:
-            first, second = self._single(first_name), self._single(second_name)
-            if first.descriptor.stage is not second.descriptor.stage:
-                raise _registration_error(
-                    f"the ordering constraint between '{first_name}' and '{second_name}' crosses stages"
-                )
-            resolved.append((first, second))
+        """按规则排序：先阶段；阶段内先位置，再归属的序数序，再登记顺序，最后按约束做稳定拓扑排序。
+
+        与 .NET 一样逐个阶段处理：一个阶段的约束目标都解析完（目标的错误在这里报）再排序（成环在这里报），然后才轮到
+        下一个阶段，所以先报哪个错与 .NET 相同。
+        """
         ordered: list[_Registration] = []
         for stage in PipelineStage:
             members = [registration for registration in self._registrations if registration.descriptor.stage is stage]
-            # 基准次序：位置、归属的序数字典序、登记顺序（规则 2–4）；sort 是稳定的
-            members.sort(key=lambda item: (item.descriptor.placement.value, item.descriptor.owner, item.order))
-            ordered.extend(_topological_sort(members, resolved))
+            # 基准次序：位置、归属的序数序（逐个 UTF-16 码元）、登记顺序（规则 2–4）；sort 是稳定的
+            members.sort(
+                key=lambda item: (item.descriptor.placement.value, _ordinal(item.descriptor.owner), item.order)
+            )
+            edges: list[tuple[_Registration, _Registration]] = []
+            for member in members:
+                edges.extend((member, self._resolve(member, name, stage)) for name in member.before)
+                edges.extend((self._resolve(member, name, stage), member) for name in member.after)
+            ordered.extend(_topological_sort(members, edges, stage))
         return ordered
 
-    def _named(self, name: str) -> list[_Registration]:
-        """名字对应的登记：实例名等于它的命名实例，与类型名等于它的登记。"""
-        return [
-            registration
-            for registration in self._registrations
-            if registration.descriptor.instance == name or registration.descriptor.middleware == name
-        ]
-
-    def _check_subject(self, name: str) -> None:
-        """约束主体在声明时必须已登记、按名字没有歧义（RFC-0004 排序规则第 7、8 条），否则立即报。"""
-        self._single(name)
-
-    def _single(self, name: str) -> _Registration:
-        """按名字取唯一的登记；没有、或一个名字对应多个中间件都是登记错误。"""
-        registrations = self._named(name)
-        if not registrations:
-            raise _registration_error(f"the ordering constraint references the unregistered middleware '{name}'")
-        if len(registrations) > 1:
-            if all(registration.descriptor.middleware == name for registration in registrations):
-                raise _registration_error(
-                    f"the middleware '{name}' has several named instances; ordering constraints by type are ambiguous"
+    def _find(self, name: str) -> _Registration | None:
+        """按名字找登记：命名实例按实例名，默认实例按类型名；一个名字对应多个登记是歧义。"""
+        found: _Registration | None = None
+        for registration in self._registrations:
+            descriptor = registration.descriptor
+            if (descriptor.middleware if descriptor.instance is None else descriptor.instance) != name:
+                continue
+            if found is not None:
+                raise FrameworkError(
+                    ERROR_CODE_REGISTRATION,
+                    f"The middleware name '{name}' matches several registrations, so ordering constraints by name are "
+                    "ambiguous for it.",
                 )
-            raise _registration_error(f"the middleware name '{name}' refers to more than one middleware")
-        return registrations[0]
+            found = registration
+        return found
+
+    def _require(self, name: str) -> _Registration:
+        """约束主体在声明时必须已登记、按名字没有歧义（RFC-0004 排序规则第 7、8 条），否则立即报。"""
+        found = self._find(name)
+        if found is None:
+            raise FrameworkError(
+                ERROR_CODE_REGISTRATION,
+                f"Middleware '{name}' is not registered, so no ordering constraint can be declared for it.",
+            )
+        return found
+
+    def _resolve(self, source: _Registration, target: str, stage: PipelineStage) -> _Registration:
+        """排序时解析约束目标：未登记、有歧义或不在同一阶段都是登记错误。"""
+        label = source.descriptor.display
+        other = self._find(target)
+        if other is None:
+            raise FrameworkError(
+                ERROR_CODE_REGISTRATION,
+                f"The ordering constraint of middleware '{label}' references unregistered middleware '{target}'.",
+            )
+        if other.descriptor.stage is not stage:
+            raise FrameworkError(
+                ERROR_CODE_REGISTRATION,
+                f"Middleware '{label}' (stage '{stage.manifest_name}') and '{target}' (stage "
+                f"'{other.descriptor.stage.manifest_name}') are not in the same stage, so no relative order can be "
+                "declared between them.",
+            )
+        return other
 
 
 def parse_stage(name: str) -> PipelineStage:
     """解析清单里的阶段名；未知阶段抛出 ``FrameworkError``（``KERNEL_PIPELINE_002``）。"""
     stage = PipelineStage.parse(name)
     if stage is None:
-        raise FrameworkError(ERROR_CODE_UNKNOWN_STAGE, f"'{name}' is not a pipeline stage.")
+        raise FrameworkError(ERROR_CODE_UNKNOWN_STAGE, f"Unknown pipeline stage '{name}'.")
     return stage
 
 
@@ -287,17 +328,21 @@ def _link(middleware: Middleware, downstream: Step) -> Step:
     return step
 
 
+def _ordinal(text: str) -> bytes:
+    """按 UTF-16 码元比较的排序键，与 .NET 的 ``StringComparer.Ordinal`` 相同。"""
+    return text.encode("utf-16-be", "surrogatepass")
+
+
 def _topological_sort(
-    members: list[_Registration], constraints: list[tuple[_Registration, _Registration]]
+    members: list[_Registration], edges: list[tuple[_Registration, _Registration]], stage: PipelineStage
 ) -> list[_Registration]:
-    """在基准次序上应用约束做稳定拓扑排序（Kahn）：每次取基准次序最靠前的无前驱节点，约束只调整必要的相对位置。"""
-    in_stage = {id(member) for member in members}
+    """在基准次序上应用约束做稳定拓扑排序（Kahn）：每次取基准次序最靠前的无前驱节点，约束只调整必要的相对位置。
+
+    成环时列出全部仍被卡住的中间件，按基准次序，按名字登记的实例带名字（RFC-0004 规则 8）。
+    """
     incoming: dict[int, int] = {}
     outgoing: dict[int, list[_Registration]] = {}
-    for first, second in constraints:
-        # 跨阶段的约束已经拒绝，所以前一项在本阶段时后一项也在
-        if id(first) not in in_stage:
-            continue
+    for first, second in edges:
         outgoing.setdefault(id(first), []).append(second)
         incoming[id(second)] = incoming.get(id(second), 0) + 1
     ordered: list[_Registration] = []
@@ -305,16 +350,13 @@ def _topological_sort(
     while remaining:
         picked = next((position for position, item in enumerate(remaining) if incoming.get(id(item), 0) == 0), None)
         if picked is None:
+            stuck = ", ".join(f"'{item.descriptor.display}'" for item in remaining)
             raise FrameworkError(
-                ERROR_CODE_CYCLE, f"the ordering constraints in stage '{remaining[0].descriptor.stage}' form a cycle"
+                ERROR_CODE_CYCLE,
+                f"Middleware ordering constraints in stage '{stage.manifest_name}' form a cycle: {stuck}.",
             )
         node = remaining.pop(picked)
         ordered.append(node)
         for successor in outgoing.get(id(node), []):
             incoming[id(successor)] -= 1
     return ordered
-
-
-def _registration_error(message: str) -> FrameworkError:
-    """登记错误（``KERNEL_PIPELINE_003``）；消息与 Go SDK 一致，句末加句号。"""
-    return FrameworkError(ERROR_CODE_REGISTRATION, message + ".")
