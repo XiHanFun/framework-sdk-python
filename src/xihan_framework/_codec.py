@@ -12,7 +12,6 @@ dataclass、枚举、``TypedId`` 子类、``Maybe``、``Result``、``Unit``、``
 """
 
 import dataclasses
-import re
 import types
 from collections.abc import Callable, Mapping, MutableSequence, Sequence
 from enum import Enum
@@ -30,7 +29,8 @@ JSON_OMIT_NONE: Final = "xihan.json.omit_none"
 
 type Decoder = Callable[[JsonValue, str], object]
 
-_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# 成员名含这些字符时路径写成 ['名字']；U+0085、U+2028、U+2029 用 chr 写出，源码里不放不可见字符
+_BRACKETED_CHARACTERS: Final = frozenset(". '/\"[]()\\\t\n\r\f\b") | {chr(0x85), chr(0x2028), chr(0x2029)}
 
 
 class DecodeError(Exception):
@@ -388,11 +388,14 @@ def _compile_dataclass(target: type, cache: dict[object, Decoder]) -> Decoder:
 
 
 def _member_path(path: str, name: str) -> str:
-    """对象成员的 JSON 路径：标识符写成 ``$.name``，其他写成 ``$['na.me']``。"""
-    if _IDENTIFIER.fullmatch(name):
-        return f"{path}.{name}"
-    escaped = name.replace("\\", "\\\\").replace("'", "\\'")
-    return f"{path}['{escaped}']"
+    """对象成员的 JSON 路径（RFC-0011 规则 2，照 System.Text.Json 的实测）。
+
+    名字含 ``.``、空格、``'``、``/``、``"``、``[``、``]``、``(``、``)``、``\\``、制表、换行、回车、换页、退格、U+0085、
+    U+2028、U+2029 之一时写成 ``$['名字']``，名字原样、不转义；其余写成 ``$.名字``，空名字写成 ``$.``。
+    """
+    if any(character in _BRACKETED_CHARACTERS for character in name):
+        return f"{path}['{name}']"
+    return f"{path}.{name}"
 
 
 def _identity(value: JsonValue, path: str) -> object:

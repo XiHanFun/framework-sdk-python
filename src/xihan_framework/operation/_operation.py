@@ -207,10 +207,11 @@ class Descriptor:
         return Response(success(), encoded)
 
     def _decode_payload(self, payload: bytes) -> tuple[object, Error | None]:
-        """解码请求载荷：空等价于 ``{}``；非 JSON、``null`` 或类型不匹配为 ``KERNEL_VALIDATION_001``，``reason`` 只写 JSON 路径。"""
+        """解码请求载荷：空等价于 ``{}``；非 JSON、``null`` 或类型不匹配为 ``KERNEL_VALIDATION_001``，``reason`` 只写 JSON 路径，根上的错误写 ``$``。"""
         text = payload.strip() or b"{}"
         if text == b"null":
-            return None, self._invalid_payload("the payload is null")
+            # null 不是请求对象：reason 写根路径 $（RFC-0011 规则 2，ADR-0235；以前写英文短语）
+            return None, self._invalid_payload("$")
         try:
             # 载荷里的重复成员规范没有规定：照 System.Text.Json 的缺省，后出现的覆盖先出现的
             value: JsonValue = loads(text, reject_duplicates=False)

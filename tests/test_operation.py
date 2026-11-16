@@ -2,7 +2,9 @@
 
 import asyncio
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
 
@@ -104,7 +106,7 @@ def test_invoke_runs_the_pipeline_and_encodes_the_response() -> None:
 
 def test_invalid_payloads_report_only_the_json_path() -> None:
     invoker = new_invoker()
-    cases = [(b"null", "the payload is null"), (b"{", "$"), (b"[1]", "$"), (b'{"quantity":"2"}', "$.quantity")]
+    cases = [(b"null", "$"), (b"{", "$"), (b"[1]", "$"), (b'{"quantity":"2"}', "$.quantity")]
     for payload, reason in cases:
         error = error_of(invoke(invoker, Request("orders.create", payload)))
         assert error.message_key == operation.MESSAGE_INVALID_PAYLOAD
@@ -336,3 +338,45 @@ def test_unhandled_exceptions_become_unexpected_errors(caplog: pytest.LogCapture
         registry, Builder().use_at(pipeline.func("Explode", explode_in_middleware), PipelineStage.OBSERVE)
     )
     assert error_of(invoke(guarded, Request("bombs.explode"))).message_key == operation.MESSAGE_UNHANDLED_EXCEPTION
+
+
+@dataclass(frozen=True)
+class ReasonLine:
+    quantity: int
+
+
+@dataclass(frozen=True)
+class ReasonOrder:
+    lines: list[ReasonLine]
+
+
+def test_payload_reasons_follow_the_vectors(vector: Callable[[str, str], Any]) -> None:
+    # 向量的两个请求类型：counts 是整数字典，order 是 { lines: [ { quantity: 整数 } ] }
+    vectors = vector("operations", "payload-reasons")
+    registry = Registry()
+
+    async def count(ctx: Context, request: dict[str, int]) -> Result[dict[str, int]]:
+        return ok(request)
+
+    async def place(ctx: Context, request: ReasonOrder) -> Result[ReasonOrder]:
+        return ok(request)
+
+    registry.add(Contract("counts.set"), count, request_type=dict[str, int], response_type=dict[str, int])
+    registry.add(Contract("orders.place"), place, request_type=ReasonOrder, response_type=ReasonOrder)
+    invoker = Invoker(registry)
+    ids = {"counts": "counts.set", "order": "orders.place"}
+    for case in vectors["cases"]:
+        error = error_of(invoke(invoker, Request(ids[case["request"]], case["payload"].encode("utf-8"))))
+        assert error.code == operation.ERROR_CODE_INVALID_PAYLOAD, case["name"]
+        assert error.message_key == operation.MESSAGE_INVALID_PAYLOAD
+        assert error.details == {"id": ids[case["request"]], "reason": case["reason"]}, case["name"]
+    for case in vectors["syntaxErrors"]:
+        error = error_of(invoke(invoker, Request(ids[case["request"]], case["payload"].encode("utf-8"))))
+        assert error.code == operation.ERROR_CODE_INVALID_PAYLOAD, case["payload"]
+        assert error.details is not None
+        reason = error.details["reason"]
+        assert isinstance(reason, str)
+        assert reason.startswith("$"), case["payload"]
+    assert (
+        invoke(invoker, Request("orders.place", b'{"lines":[{"quantity":2}]}')).payload == b'{"lines":[{"quantity":2}]}'
+    )
