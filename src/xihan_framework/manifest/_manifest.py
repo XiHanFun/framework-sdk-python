@@ -199,7 +199,8 @@ class Manifest:
     requires: tuple[CapabilityRequirement, ...] = ()
     bindings: tuple[Binding, ...] = ()
     contributes: Contributions | None = None
-    activation: tuple[str, ...] = ()
+    activation: tuple[str, ...] | None = None
+    """激活事件；``None`` 表示清单没写，缺省为 ``onStartup``，写了就至少一项。"""
     permissions: tuple[str, ...] = ()
     entry: str | None = None
 
@@ -216,7 +217,7 @@ class Manifest:
     @property
     def effective_activation(self) -> tuple[str, ...]:
         """激活事件，缺省为 ``onStartup``。"""
-        return self.activation or (ON_STARTUP,)
+        return (ON_STARTUP,) if self.activation is None else self.activation
 
     @property
     def activates_on_startup(self) -> bool:
@@ -315,7 +316,10 @@ def _validate(manifest: Manifest) -> None:
         if binding.name in seen:
             raise _invalid(f"'{id}' declares the binding '{binding.name}' more than once")
         seen.add(binding.name)
-    for event in manifest.activation:
+    # activation 至少一项，空数组不合法，缺省才是 onStartup（RFC-0002 解析规则 2，ADR-0235）
+    if manifest.activation is not None and not manifest.activation:
+        raise _invalid(f"the activation of '{id}' must list at least one event; omit it to activate on startup")
+    for event in manifest.activation or ():
         if _ACTIVATION.fullmatch(event) is None:
             raise _invalid(f"the activation event '{event}' of '{id}' is not valid")
     for permission in manifest.permissions:
@@ -441,7 +445,7 @@ def _manifest(value: JsonValue) -> Manifest:
         requires=tuple(_requirement(item, path) for item, path in _array(members, "requires", "$")),
         bindings=tuple(_binding(item, path) for item, path in _array(members, "bindings", "$")),
         contributes=None if "contributes" not in members else _contributions(contributes, "$.contributes"),
-        activation=_strings(members, "activation", "$"),
+        activation=None if "activation" not in members else _strings(members, "activation", "$"),
         permissions=_strings(members, "permissions", "$"),
         entry=_string(members, "entry", "$"),
     )
@@ -604,7 +608,7 @@ def _manifest_json(manifest: Manifest) -> dict[str, JsonValue]:
     _put_list(members, "bindings", [_binding_json(item) for item in manifest.bindings])
     if manifest.contributes is not None:
         members["contributes"] = _contributions_json(manifest.contributes)
-    _put_list(members, "activation", list(manifest.activation))
+    _put(members, "activation", None if manifest.activation is None else list(manifest.activation))
     _put_list(members, "permissions", list(manifest.permissions))
     _put(members, "entry", manifest.entry)
     return members

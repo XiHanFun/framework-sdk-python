@@ -316,3 +316,33 @@ def test_duplicate_members_make_a_manifest_invalid() -> None:
     )
     assert isinstance(error.__cause__, ValueError)
     assert "more than once" in str(error.__cause__)
+
+
+def test_manifests_follow_the_vectors(vector: VectorLoader) -> None:
+    vectors = vector("manifest", "manifests")
+    for case in vectors["valid"]:
+        parsed = manifest.read(json.dumps(case["manifest"]))
+        # 写出的清单再读一遍得到同一份清单（RFC-0002 解析规则 2）
+        assert manifest.read(manifest.write(parsed)) == parsed, case["name"]
+    for case in vectors["invalid"]:
+        text = case["text"] if "text" in case else json.dumps(case["manifest"])
+        with pytest.raises(FrameworkError) as raised:
+            manifest.read(text)
+        assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT, case["name"]
+
+
+def test_an_empty_activation_is_not_the_default() -> None:
+    assert_rejected(manifest_json(activation=[]))
+    with pytest.raises(FrameworkError):
+        Manifest(
+            id="xihan.a.b",
+            version="1.0.0",
+            primitives=1,
+            stability=Stability.STABLE,
+            kind=Kind.CAPABILITY,
+            activation=(),
+        )
+    absent = manifest.read(manifest_json())
+    assert absent.activation is None
+    assert absent.effective_activation == ("onStartup",)
+    assert '"activation"' not in manifest.write(absent)
