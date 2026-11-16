@@ -1,14 +1,15 @@
 """消息原语（RFC-0001、RFC-0010）：消息键文法、模板格式化、未解析时的描述与进程默认的解析器。"""
 
 import math
+import numbers
 import re
 import threading
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence, Set
 from decimal import ROUND_HALF_EVEN, Context, Decimal
 from types import MappingProxyType
 from typing import Final, NamedTuple, Protocol
 
-from xihan_framework._json import exponent_notation, fixed_notation, shortest_digits
+from xihan_framework._json import INT64_MAX, INT64_MIN, MAX_DEPTH, int_to_float, number_text, quote
 from xihan_framework.primitives._error_code import ERROR_CODE_INVALID_ARGUMENT
 from xihan_framework.primitives._framework import FrameworkError
 
@@ -21,11 +22,18 @@ MAX_MESSAGE_KEY_LENGTH: Final = 128
 _MESSAGE_KEY_PATTERN = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+")
 # 占位符名：字母开头的字母、数字与下划线（按名字），或纯数字（按位置）（RFC-0010「模板」）
 _PLACEHOLDER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]*|[0-9]+")
-# 可移植的格式说明符：D、X / x、F、N，可带精度；字母大小写与 .NET 一样不区分（X / x 决定十六进制的大小写）
-_PORTABLE_SPECIFIER = re.compile(r"([DdXxFfNn])([0-9]{0,9})")
-# 浮点在这个范围内写最短往返的定点形式（RFC-0010「值的文本形式」）
-_PLAIN_FLOAT_MIN: Final = 1e-4
-_PLAIN_FLOAT_MAX: Final = 1e17
+# 可移植的格式说明符：D、X / x、F、N 加至多两位精度，整串匹配（RFC-0010「模板」，ADR-0236）
+_PORTABLE_SPECIFIER = re.compile(r"([DdXxFfNn])([0-9]{0,2})")
+# 区域的小数点与分组符（RFC-0010「模板」的固定表，ADR-0236）；表外的区域与不给区域一样按不变文化
+_INVARIANT_SYMBOLS: Final = (".", ",")
+_LOCALE_SYMBOLS: Final = {
+    "de-de": (",", "."),
+    "es-es": (",", "."),
+    "pt-br": (",", "."),
+    "fr-fr": (",", chr(0x202F)),
+    "ru-ru": (",", chr(0xA0)),
+}
+_ASCII_LOWER: Final = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
 
 class _Placeholder(NamedTuple):
@@ -37,7 +45,7 @@ class _Placeholder(NamedTuple):
 
 
 def is_message_key(key: str) -> bool:
-    """判断消息键是否符合 ``^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`` 且不超过 128 个字符。"""
+    """判断消息键是否符合 ``^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$`` 且不超过 128 个字符，按整串匹配。"""
     return len(key) <= MAX_MESSAGE_KEY_LENGTH and _MESSAGE_KEY_PATTERN.fullmatch(key) is not None
 
 
@@ -55,22 +63,24 @@ def placeholders(template: str) -> list[str]:
     return names
 
 
-def format_message(template: str, arguments: Mapping[str, object] | None) -> str:
+def format_message(template: str, arguments: Mapping[str, object] | None, *, locale: str | None = None) -> str:
     """宽松格式化（RFC-0010「模板」）：缺值的占位符连同格式说明符原样留在文本里，让遗漏可见。
 
     ``{name}`` 取命名参数，``{0}`` 取位置参数（键 ``"0"``、``"1"``…，见 ``positional``）；``{{`` 与 ``}}`` 是转义的
-    单个花括号；花括号里不是合法名字的与没有闭合的 ``{`` 之后的文本原样输出；参数值里的花括号不再解释。占位符可带
-    可移植的格式说明符 ``D``、``X`` / ``x``、``F``、``N``（按不变文化，``F`` 与 ``N`` 正好一半时取偶），其他说明符
-    按无格式输出。参数存在而值为 ``None`` 不算缺值，写空串。
+    单个花括号；花括号里不是合法名字的与没有闭合的 ``{`` 之后的文本原样输出；参数值里的花括号不再解释。值按
+    ``format_argument`` 的规则写出：只认可移植的说明符 ``D``、``X`` / ``x``、``F``、``N``，``locale`` 只改变小数点与分组符。
+    参数存在而值为 ``None`` 不算缺值，写空串。
     """
-    rendered = _render(template, arguments, strict=False)
+    rendered = _render(template, arguments, locale, strict=False)
     assert rendered is not None
     return rendered
 
 
-def try_format_message(template: str, arguments: Mapping[str, object] | None) -> str | None:
+def try_format_message(
+    template: str, arguments: Mapping[str, object] | None, *, locale: str | None = None
+) -> str | None:
     """严格格式化：任一占位符缺值即为 ``None``，供解析器拒绝半截译文、退回 ``describe``；其余规则同 ``format_message``。"""
-    return _render(template, arguments, strict=True)
+    return _render(template, arguments, locale, strict=True)
 
 
 def positional(*values: object) -> dict[str, object]:
@@ -79,7 +89,7 @@ def positional(*values: object) -> dict[str, object]:
 
 
 def describe(key: str, arguments: Mapping[str, object] | None) -> str:
-    """没有文案时描述一个消息：``键 (k=v, ...)``，值按 ``format_argument`` 的文本形式；没有参数时就是键。
+    """没有文案时描述一个消息：``键 (k=v, ...)``，值按 ``format_argument`` 的无格式文本（不随区域变化）；没有参数时就是键。
 
     参数按名字的序数顺序排列，逐个 UTF-16 码元比较（RFC-0010，ADR-0235）：与 .NET 的 ``string.CompareOrdinal`` 相同，
     基本多文种平面以外的字符排在 U+E000–U+FFFF 之前，与按码点比较不同。
@@ -90,38 +100,48 @@ def describe(key: str, arguments: Mapping[str, object] | None) -> str:
     return f"{key} ({parts})"
 
 
-def format_argument(value: object) -> str:
-    """一个参数的文本形式（RFC-0010「值的文本形式」），无格式说明符时与 ``describe`` 用它。
+def format_argument(value: object, specifier: str | None = None, *, locale: str | None = None) -> str:
+    """一个参数值的文本（RFC-0010「模板」，ADR-0236）。
 
-    字符串原样，整数十进制，布尔写 ``true`` / ``false``，``None`` 写空串；浮点在 1e-4 ≤ |x| < 1e17 或为 0 时写最短
-    往返的定点形式，整数值不带小数点（``2.0`` 写 ``2``，1e16 写 ``10000000000000000``），范围外写最短往返的有效数字
-    加 ``E``、符号与至少两位的指数（``1E+17``、``9.9E-05``、``5E-324``）；负零写 ``-0``，非数与无穷写 ``NaN``、
-    ``Infinity``、``-Infinity``。数组与对象规范不作规定：数组写 ``[a b]``，对象按键排序写 ``map[k:v]``，其他值用 ``str``。
+    值先归到值模型：``None``、布尔、字符串、64 位整数、双精度浮点、数组与对象。超出 64 位的整数、``Decimal`` 与其他实数
+    是浮点；``IntEnum`` 是整数，``StrEnum`` 是字符串；键为字符串的映射是对象，其余序列与集合是数组；模型之外的值
+    （``datetime``、普通 ``Enum``、``UUID`` 等）取 ``str(value)``。
+
+    - ``None`` 写空串，布尔写 ``true`` / ``false``，字符串原样，数字见 ``_json.number_text``。
+    - 数组与对象写成紧凑的 JSON：对象成员按名字的 UTF-16 码元序排列（同名保持原序），嵌套的 ``None`` 写 ``null``，
+      数字写法同顶层，超过 64 层的容器写 ``null``；说明符与区域都不影响它们。
+    - ``specifier`` 只认 ``^[DdFfNnXx][0-9]{0,2}$``：``D`` 至少 n 位的整数，``X`` / ``x`` 非负整数的大写 / 小写十六进制，
+      ``F`` 定点小数、``N`` 带千分位的定点小数（n 位小数，缺省 2，正好一半时取偶）；``D`` 与 ``X`` 只用于整数，``F`` 与
+      ``N`` 用于整数与浮点，不认或不适用时按无格式写出。
+    - ``locale`` 只改变小数点与分组符（de-DE、es-ES、pt-BR 是 ``,`` 与 ``.``，fr-FR 是 ``,`` 与 U+202F，ru-RU 是 ``,``
+      与 U+00A0，区域名不区分大小写，其余按 ``.`` 与 ``,``）：小数点用于无格式的浮点与 ``F``、``N``，分组符只用于 ``N``。
     """
-    if value is None:
+    model = _model(value)
+    if model is None:
         return ""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, float):
-        return _float_text(value)
-    if isinstance(value, str):
-        return value
-    if isinstance(value, Mapping):
-        members = " ".join(f"{name}:{format_argument(value[name])}" for name in sorted(value, key=str))
-        return f"map[{members}]"
-    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
-        return "[" + " ".join(format_argument(element) for element in value) + "]"
-    return str(value)
+    if isinstance(model, bool):
+        return "true" if model else "false"
+    if isinstance(model, str):
+        return model
+    if isinstance(model, (int, float)):
+        text = _format_number(model, specifier)
+        decimal, group = _symbols(locale)
+        if (decimal, group) == _INVARIANT_SYMBOLS:
+            return text
+        return text.translate({ord("."): decimal, ord(","): group})
+    parts: list[str] = []
+    _write_json(model, parts, 1)
+    return "".join(parts)
 
 
-def _render(template: str, arguments: Mapping[str, object] | None, *, strict: bool) -> str | None:
+def _render(template: str, arguments: Mapping[str, object] | None, locale: str | None, *, strict: bool) -> str | None:
     """逐段渲染模板；严格模式下任一占位符缺值返回 ``None``。"""
     parts: list[str] = []
     for segment in _segments(template):
         if isinstance(segment, str):
             parts.append(segment)
         elif arguments is not None and segment.name in arguments:
-            parts.append(_format_value(arguments[segment.name], segment.specifier))
+            parts.append(format_argument(arguments[segment.name], segment.specifier, locale=locale))
         elif strict:
             return None
         else:
@@ -164,23 +184,48 @@ def _segments(template: str) -> Iterator[str | _Placeholder]:
         yield template[literal_start:]
 
 
-def _format_value(value: object, specifier: str | None) -> str:
-    """按格式说明符格式化一个值；不是可移植的说明符、或说明符不适用于这个值时按无格式输出。"""
-    if specifier is not None and (match := _PORTABLE_SPECIFIER.fullmatch(specifier)) is not None:
-        kind, digits = match.group(1), match.group(2)
-        is_integer = isinstance(value, int) and not isinstance(value, bool)
-        is_number = is_integer or (isinstance(value, float) and math.isfinite(value))
-        if kind in "Dd" and is_integer:
-            assert isinstance(value, int)
-            return ("-" if value < 0 else "") + str(abs(value)).zfill(int(digits or "0"))
-        if kind in "Xx" and is_integer:
-            assert isinstance(value, int)
-            if value >= 0:
-                return format(value, kind).zfill(int(digits or "0"))
-        if kind in "FfNn" and is_number:
-            assert isinstance(value, (int, float))
-            return _fixed(value, int(digits) if digits else 2, grouping=kind in "Nn")
-    return format_argument(value)
+def _model(value: object) -> object:
+    """把值归到值模型；容器原样交回（写 JSON 时逐项再归），模型之外的值换成 ``str(value)``。
+
+    ``bool`` 是 ``int`` 的子类，所以先判断；``str`` 与数字的子类（``StrEnum``、``IntEnum``）取它们的基本值。
+    """
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return str.__str__(value)
+    if isinstance(value, int):
+        number = int(value)
+        return number if INT64_MIN <= number <= INT64_MAX else int_to_float(number)
+    if isinstance(value, float):
+        return float(value)
+    if isinstance(value, Decimal):
+        return math.nan if value.is_nan() else float(value)
+    if isinstance(value, numbers.Integral):
+        return _model(int(value))
+    if isinstance(value, numbers.Real):
+        return float(value)
+    if isinstance(value, (Mapping, Sequence, Set)) and not isinstance(value, (bytes, bytearray, memoryview)):
+        return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return list(bytes(value))
+    return str(value)
+
+
+def _format_number(value: int | float, specifier: str | None) -> str:
+    """数字的不变文化文本：认得且适用的说明符按它，否则无格式。"""
+    match = None if specifier is None else _PORTABLE_SPECIFIER.fullmatch(specifier)
+    if match is None:
+        return number_text(value)
+    letter, digits = match.group(1), match.group(2)
+    precision = int(digits) if digits else None
+    if isinstance(value, int):
+        if letter in "Dd":
+            return ("-" if value < 0 else "") + str(abs(value)).zfill(precision or 0)
+        if letter in "Xx" and value >= 0:
+            return format(value, letter).zfill(precision or 0)
+    if letter in "FfNn" and (isinstance(value, int) or math.isfinite(value)):
+        return _fixed(value, 2 if precision is None else precision, grouping=letter in "Nn")
+    return number_text(value)
 
 
 def _fixed(value: int | float, digits: int, *, grouping: bool) -> str:
@@ -194,24 +239,52 @@ def _fixed(value: int | float, digits: int, *, grouping: bool) -> str:
     return format(rounded, ",f" if grouping else "f")
 
 
+def _symbols(locale: str | None) -> tuple[str, str]:
+    """区域的小数点与分组符；区域名按 ASCII 不区分大小写。"""
+    if locale is None:
+        return _INVARIANT_SYMBOLS
+    return _LOCALE_SYMBOLS.get(locale.translate(_ASCII_LOWER), _INVARIANT_SYMBOLS)
+
+
+def _write_json(value: object, parts: list[str], depth: int) -> None:
+    """把模型里的值写成紧凑的 JSON 文本；``depth`` 是这里的容器所在的层，超过 64 层写 ``null``。"""
+    model = _model(value)
+    if model is None:
+        parts.append("null")
+    elif isinstance(model, bool):
+        parts.append("true" if model else "false")
+    elif isinstance(model, str):
+        parts.append(quote(model))
+    elif isinstance(model, (int, float)):
+        parts.append(number_text(model))
+    elif depth > MAX_DEPTH:
+        parts.append("null")
+    elif isinstance(model, Mapping):
+        members = sorted(
+            ((format_argument(name), member) for name, member in model.items()),
+            key=lambda pair: _utf16_order(pair[0]),
+        )
+        parts.append("{")
+        for index, (name, member) in enumerate(members):
+            if index:
+                parts.append(",")
+            parts.append(quote(name))
+            parts.append(":")
+            _write_json(member, parts, depth + 1)
+        parts.append("}")
+    else:
+        assert isinstance(model, (Sequence, Set))
+        parts.append("[")
+        for index, element in enumerate(model):
+            if index:
+                parts.append(",")
+            _write_json(element, parts, depth + 1)
+        parts.append("]")
+
+
 def _utf16_order(name: str) -> bytes:
     """按 UTF-16 码元比较的排序键：UTF-16BE 的字节序就是码元的序；孤立代理项原样计为一个码元。"""
     return name.encode("utf-16-be", "surrogatepass")
-
-
-def _float_text(value: float) -> str:
-    """浮点的文本形式：范围内写最短往返的定点形式（Python 的 ``repr`` 到 1e16 就换成指数，所以自己写），范围外写 .NET 的指数形式。"""
-    if math.isnan(value):
-        return "NaN"
-    if math.isinf(value):
-        return "Infinity" if value > 0 else "-Infinity"
-    if value == 0:
-        return "-0" if math.copysign(1.0, value) < 0 else "0"
-    digits, point = shortest_digits(value)
-    sign = "-" if value < 0 else ""
-    if _PLAIN_FLOAT_MIN <= abs(value) < _PLAIN_FLOAT_MAX:
-        return sign + fixed_notation(digits, point)
-    return sign + exponent_notation(digits, point).upper()
 
 
 class MessageResolver(Protocol):
@@ -249,11 +322,11 @@ class Catalog:
         return self._locales
 
     def resolve(self, key: str, locale: str, arguments: Mapping[str, object] | None) -> str | None:
-        """解析消息键：先找请求的区域，没有再找 ``en-US``；按严格格式化，占位符缺值时为 ``None``（RFC-0010「解析」）。"""
+        """解析消息键：先找请求的区域，没有再找 ``en-US``；按请求的区域严格格式化，占位符缺值时为 ``None``（RFC-0010「解析」）。"""
         template = self._locales.get(locale, {}).get(key)
         if template is None and locale != DEFAULT_LOCALE:
             template = self._locales.get(DEFAULT_LOCALE, {}).get(key)
-        return None if template is None else try_format_message(template, arguments)
+        return None if template is None else try_format_message(template, arguments, locale=locale)
 
 
 # 进程默认的解析器与区域（RFC-0001 MessageScope.Default）：读取远多于设置，存成一个元组整体替换，

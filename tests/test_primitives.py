@@ -1,8 +1,14 @@
 """primitives 的测试：一致性向量（错误码、Baggage 键、生命周期迁移）与 Go SDK 移植来的编码、消息与工厂用例。"""
 
+import math
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
+from enum import Enum, IntEnum, StrEnum
+from fractions import Fraction
 from typing import Any
+from uuid import UUID
 
 import pytest
 
@@ -26,6 +32,18 @@ from xihan_framework.primitives import (
 )
 
 type VectorLoader = Callable[[str, str], Any]
+
+
+class _Level(IntEnum):
+    HIGH = 2
+
+
+class _Tone(StrEnum):
+    WARM = "warm"
+
+
+class _Shade(Enum):
+    DARK = 1
 
 
 def _as_int(value: JsonValue) -> int:
@@ -141,8 +159,9 @@ def test_error_details_must_be_json_values() -> None:
     with pytest.raises(FrameworkError) as raised:
         Error("ORDERS_VALIDATION_001", "orders.invalid", {"ids": {1, 2}})  # type: ignore[dict-item]
     assert "'ids'" in raised.value.message
-    with pytest.raises(FrameworkError):
-        Error("ORDERS_VALIDATION_001", "orders.invalid", {"ratio": float("nan")})
+    # 非有限的浮点是值模型里的值，写出时是字符串（RFC-0001「Result」，ADR-0236）
+    special = Error("ORDERS_VALIDATION_001", "orders.invalid", {"ratio": float("nan"), "top": float("-inf")})
+    assert '"details":{"ratio":"NaN","top":"-Infinity"}' in special.to_json()
     details: dict[str, JsonValue] = {"items": [1, "a", None, {"b": True}]}
     error = Error("ORDERS_VALIDATION_001", "orders.invalid", details)
     details["items"] = []
@@ -195,6 +214,8 @@ def test_templates_format_named_positional_and_escaped_placeholders() -> None:
     assert primitives.format_message("{{id}} is {id}", {"id": 1}) == "{id} is 1"
     assert primitives.format_message("{0}-{1}", primitives.positional("x", 2)) == "x-2"
     assert primitives.format_message("{amount:N2}", {"amount": 1.5}) == "1.50"
+    assert primitives.format_message("{amount:N2}", {"amount": 1234.5}, locale="fr-FR") == "1" + chr(0x202F) + "234,50"
+    assert primitives.try_format_message("{amount:F1}", {"amount": 2.25}, locale="DE-de") == "2,2"
     assert primitives.format_message("{when:yyyy-MM-dd}", {"when": "2026-11-16"}) == "2026-11-16"
     assert primitives.format_message("{n:F2}", {"n": "seven"}) == "seven"
     assert primitives.format_message("{n:X}", {"n": -1}) == "-1"
@@ -230,12 +251,31 @@ def test_arguments_follow_the_text_forms() -> None:
         (float("inf"), "Infinity"),
         (float("-inf"), "-Infinity"),
         (float("nan"), "NaN"),
-        # 数组与对象规范不作规定，沿用 Go 的写法
-        ([1, "a"], "[1 a]"),
-        ({"b": 1, "a": 2}, "map[a:2 b:1]"),
+        # 值模型（RFC-0010「模板」，ADR-0236）：超出 64 位的整数、Decimal 与其他实数是浮点，IntEnum 是整数
+        (2**63, "9.223372036854776E+18"),
+        (10**400, "Infinity"),
+        (Decimal("2.50"), "2.5"),
+        (Fraction(1, 4), "0.25"),
+        (_Level.HIGH, "2"),
+        (_Tone.WARM, "warm"),
+        # 数组与对象写成紧凑的 JSON，对象成员按名字的 UTF-16 码元序排列
+        ([1, "a", None, 2.0, [True]], '[1,"a",null,2,[true]]'),
+        ((1, 2), "[1,2]"),
+        (b"\x01\xff", "[1,255]"),
+        ({"b": 1, "a": {"d": None}}, '{"a":{"d":null},"b":1}'),
+        ({2: "x", 10: "y"}, '{"10":"y","2":"x"}'),
+        # 模型之外的值取 str()
+        (_Shade.DARK, "_Shade.DARK"),
+        (datetime(2026, 11, 16, 8, 30), "2026-11-16 08:30:00"),
+        (UUID(int=1), "00000000-0000-0000-0000-000000000001"),
+        ([_Shade.DARK], '["_Shade.DARK"]'),
     ]
     for value, text in cases:
         assert primitives.format_argument(value) == text, value
+    # 超过 64 层的容器写 null；自引用的列表因此也写得出
+    nested: list[object] = []
+    nested.append(nested)
+    assert primitives.format_argument(nested) == "[" * 64 + "null" + "]" * 64
 
 
 def test_catalog_checks_keys_and_falls_back_to_english() -> None:
@@ -368,37 +408,103 @@ class _Line:
     price: float
 
 
-def test_json_is_written_like_go_encoding_json() -> None:
-    numbers = [2.0, 0.1, 1e20, 1e21, 1e-6, 1e-7, 1.5e-10, 123456789.0, -0.0, 3.14159, 5e-324, 1.7976931348623157e308]
+# 写进源码的不可见字符与转义用 chr 拼出
+_BACKSLASH = chr(92)
+_LINE_SEPARATOR = chr(0x2028)
+
+
+def test_json_is_written_by_the_value_model() -> None:
+    # 整数值的浮点带 .0 或指数，读回来仍是浮点；超出 64 位的整数按浮点写；非有限的浮点写成字符串（RFC-0001「Result」，ADR-0236）
+    numbers: list[JsonValue] = [
+        2.0,
+        0.1,
+        1e16,
+        1e20,
+        1e-6,
+        1.5e-10,
+        123456789.0,
+        -0.0,
+        3.14159,
+        5e-324,
+        1.7976931348623157e308,
+        2,
+        9007199254740993,
+        2**63,
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+    ]
     assert _json.dumps(numbers) == (
-        "[2,0.1,100000000000000000000,1e+21,0.000001,1e-7,1.5e-10,123456789,-0,3.14159,5e-324,1.7976931348623157e+308]"
+        "[2.0,0.1,10000000000000000.0,1E+20,1E-06,1.5E-10,123456789.0,-0.0,3.14159,5E-324,1.7976931348623157E+308,"
+        '2,9007199254740993,9.223372036854776E+18,"NaN","Infinity","-Infinity"]'
     )
-    assert _json.dumps("<a&b>\u2028\n\t\x01") == '"\\u003ca\\u0026b\\u003e\\u2028\\n\\t\\u0001"'
-    assert _json.dumps("\ud800") == '"\\ufffd"'
+    # 字符串只转义必须转义的字符（RFC-0010「模板」的 JSON 字符串写法）
+    text = "<a&b>/" + _LINE_SEPARATOR + chr(0x7F) + chr(0xE9) + "\n\t" + chr(1) + chr(0x1F) + '"' + _BACKSLASH
+    assert _json.dumps(text) == (
+        '"<a&b>/'
+        + _LINE_SEPARATOR
+        + chr(0x7F)
+        + chr(0xE9)
+        + _BACKSLASH
+        + "n"
+        + _BACKSLASH
+        + "t"
+        + _BACKSLASH
+        + "u0001"
+        + _BACKSLASH
+        + "u001f"
+        + _BACKSLASH
+        + '"'
+        + _BACKSLASH
+        + _BACKSLASH
+        + '"'
+    )
+    assert _json.dumps(chr(0xD800)) == '"' + _BACKSLASH + 'ud800"'
+    assert _json.dumps(chr(0xD83D) + chr(0xDE00)) == '"' + chr(0x1F600) + '"'
     assert _json.dumps({"b": [], "a": {}}, indent=True) == '{\n  "b": [],\n  "a": {}\n}'
-    assert _json.dumps(ok([_Line("x", 2.0)]).to_json_value()) == '{"ok":true,"value":[{"sku":"x","price":2}]}'
-    with pytest.raises(ValueError, match="not representable"):
-        _json.dumps(float("inf"))
-    with pytest.raises(ValueError, match="not valid JSON"):
-        _json.loads("NaN")
+    assert _json.dumps(ok([_Line("x", 2.0)]).to_json_value()) == '{"ok":true,"value":[{"sku":"x","price":2.0}]}'
 
 
-def test_error_encoding_matches_the_go_bytes() -> None:
-    # JSON 的字节形式（成员顺序、转义、浮点写法）是 Go SDK 的 json.Marshal(err) 对同样输入的实际输出；
-    # message 里的描述按 RFC-0010「值的文本形式」（ADR-0233 起 null 写空串、浮点不用 Go 的 %v），与 Go 不同
+def test_json_text_follows_the_vector(vector: VectorLoader) -> None:
+    # 共同的 JSON 读取检查（RFC-0001「JSON 文本」，ADR-0236）：语法错误只写 $，重复成员写第一处重复的路径
+    for case in vector("primitives", "json-text")["cases"]:
+        data: str | bytes = bytes.fromhex(case["hex"]) if "hex" in case else case["text"]
+        if case["expect"] == "valid":
+            _json.parse(data)
+            continue
+        with pytest.raises(_json.JsonTextError) as raised:
+            _json.parse(data)
+        assert raised.value.syntax == (case["expect"] == "syntax"), case["name"]
+        assert raised.value.path == case.get("path", "$"), case["name"]
+    # 数字按值模型读：64 位范围内的整数写法是整数，其余是浮点，上溢为无穷
+    assert _same(
+        _json.parse("[9007199254740993,-9223372036854775808,9223372036854775808,-0,-0.0,2.0,1e2,1e400,1e-400]"),
+        [9007199254740993, -(2**63), 9.223372036854776e18, 0, -0.0, 2.0, 100.0, float("inf"), 0.0],
+    )
+    # Python 的 str 里的代理项码点不是合法的 Unicode
+    with pytest.raises(_json.JsonTextError):
+        _json.parse('"' + chr(0xD800) + '"')
+
+
+def test_error_encoding_bytes() -> None:
     inner = Error.literal("KERNEL_UNEXPECTED_001", "boom <&>")
     details: dict[str, JsonValue] = {
         "z": 1.5,
-        "a": {"y": [1, "x", True, None, 2.0, 1e21, 1e-7], "b": "\u2028\t"},
+        "a": {"y": [1, "x", True, None, 2.0, 1e21, 1e-7], "b": _LINE_SEPARATOR + "\t"},
         "m": 123456789.0,
     }
     error = Error.unexpected("ORDERS_UNEXPECTED_001", "orders.failed", details, inner)
-    # 原始字符串：JSON 里的转义（\u2028、\t、\u003c）都是字面的反斜杠序列
+    # message 里的描述按 RFC-0010「模板」：数组与对象写紧凑的 JSON、对象成员按名字排序，数字写法同顶层（2.0 写 2）
+    description = (
+        'orders.failed (a={"b":"' + _LINE_SEPARATOR + _BACKSLASH + 't","y":[1,"x",true,null,2,1E+21,1E-07]}, '
+        "m=123456789, z=1.5)"
+    )
+    assert error.message == description
+    # 线上的细节按值模型写：整数值的浮点带 .0
     assert error.to_json() == (
-        r'{"code":"ORDERS_UNEXPECTED_001","message":"orders.failed (a=map[b:\u2028\t y:[1 x true  2 '
-        r'1E+21 1E-07]], m=123456789, z=1.5)","messageKey":"orders.failed","details":{"a":{"b":"\u2028\t",'
-        r'"y":[1,"x",true,null,2,1e+21,1e-7]},"m":123456789,"z":1.5},"inner":{"code":"KERNEL_UNEXPECTED_001",'
-        r'"message":"boom \u003c\u0026\u003e"}}'
+        '{"code":"ORDERS_UNEXPECTED_001","message":' + _json.quote(description) + ',"messageKey":"orders.failed",'
+        '"details":{"a":{"b":"' + _LINE_SEPARATOR + _BACKSLASH + 't","y":[1,"x",true,null,2.0,1E+21,1E-07]},'
+        '"m":123456789.0,"z":1.5},"inner":{"code":"KERNEL_UNEXPECTED_001","message":"boom <&>"}}'
     )
     arguments: dict[str, object] = {
         "b": True,
@@ -412,9 +518,28 @@ def test_error_encoding_matches_the_go_bytes() -> None:
         "s": "x",
     }
     assert primitives.describe("orders.failed", arguments) == (
-        "orders.failed (b=true, f=1000000, g=100000, h=1E-05, i=42, l=[1 a], m=map[a:2 b:1], n=, s=x)"
+        'orders.failed (b=true, f=1000000, g=100000, h=1E-05, i=42, l=[1,"a"], m={"a":2,"b":1}, n=, s=x)'
     )
     assert primitives.format_message("{0} of {count:%03d} {x:N2}", {"0": "a", "count": 7, "x": 1.5}) == "a of 7 1.50"
+
+
+def _same(left: object, right: object) -> bool:
+    """按值模型比较两个 JSON 值：布尔、整数与浮点互不相等，整数精确比较，浮点按值（连同负零的符号）比较。"""
+    if isinstance(left, bool) or isinstance(right, bool) or left is None or right is None:
+        return left is right
+    if isinstance(left, int) or isinstance(right, int):
+        return type(left) is type(right) and left == right
+    if isinstance(left, float) or isinstance(right, float):
+        if not (isinstance(left, float) and isinstance(right, float)):
+            return False
+        return left == right and math.copysign(1.0, left) == math.copysign(1.0, right)
+    if isinstance(left, str) or isinstance(right, str):
+        return left == right
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(_same(left[name], right[name]) for name in left)
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(_same(a, b) for a, b in zip(left, right, strict=True))
+    return False
 
 
 def _identity(value: JsonValue) -> JsonValue:
@@ -435,8 +560,11 @@ def _read_result(kind: str, value: JsonValue) -> JsonValue:
 def test_result_encoding_follows_the_wire_vectors(vector: VectorLoader) -> None:
     results = vector("primitives", "wire-encoding")["results"]
     for case in results["valid"]:
-        # 再写出时按 JSON 值等于规范形式，不比较成员顺序
-        assert _read_result(case["kind"], case["json"]) == case.get("canonical", case["json"]), case["name"]
+        # 再写出时按 JSON 值等于规范形式，不比较成员顺序；数字按值模型比较，所以经文本读写一遍（ADR-0236）
+        assert _same(_read_result(case["kind"], case["json"]), case.get("canonical", case["json"])), case["name"]
+        text = _read_text("result", case["kind"], _json.dumps(case["json"]))
+        assert isinstance(text, Result)
+        assert _same(_json.parse(text.to_json()), case.get("canonical", case["json"])), case["name"]
     for case in results["invalid"]:
         with pytest.raises(FrameworkError) as raised:
             _read_result(case["kind"], case["json"])
@@ -447,7 +575,9 @@ def test_error_encoding_follows_the_wire_vectors(vector: VectorLoader) -> None:
     errors = vector("primitives", "wire-encoding")["errors"]
     for case in errors["valid"]:
         decoded = Error.from_json_value(case["json"])
-        assert decoded.to_json_value() == case.get("canonical", case["json"]), case["name"]
+        assert _same(decoded.to_json_value(), case.get("canonical", case["json"])), case["name"]
+        text = Error.from_json(_json.dumps(case["json"]))
+        assert _same(_json.parse(text.to_json()), case.get("canonical", case["json"])), case["name"]
     for case in errors["invalid"]:
         with pytest.raises(FrameworkError) as raised:
             Error.from_json_value(case["json"])
@@ -471,9 +601,16 @@ def test_message_templates_follow_the_vectors(vector: VectorLoader) -> None:
     for key in vectors["keys"]["invalid"]:
         assert not primitives.is_message_key(key), key
     for case in vectors["format"]:
-        # 向量里的 JSON 值按原类型交给格式化：整数、浮点、布尔、字符串与 null
-        assert primitives.format_message(case["template"], case["arguments"]) == case["lenient"], case["name"]
-        assert primitives.try_format_message(case["template"], case["arguments"]) == case["strict"], case["name"]
+        # 向量里的 JSON 值按原类型交给格式化：整数、浮点、布尔、字符串、null、数组与对象；可带区域（ADR-0236）
+        locale = case.get("locale")
+        lenient = primitives.format_message(case["template"], case["arguments"], locale=locale)
+        assert lenient == case["lenient"], case["name"]
+        strict = primitives.try_format_message(case["template"], case["arguments"], locale=locale)
+        assert strict == case["strict"], case["name"]
+        if locale is not None:
+            # 本地化解析按请求的区域取符号
+            catalog = Catalog({locale: {"tests.template": case["template"]}})
+            assert catalog.resolve("tests.template", locale, case["arguments"]) == case["strict"], case["name"]
     for case in vectors["describe"]:
         assert primitives.describe(case["key"], case["arguments"]) == case["text"], case["key"]
 
@@ -505,14 +642,14 @@ def test_describe_orders_arguments_by_utf16_code_units() -> None:
 
 
 def test_duplicate_members_are_rejected(vector: VectorLoader) -> None:
-    # JSON 值表达不了重复的成员名，向量给的是原文；同一层重复即不合法，不取第一个也不取最后一个（ADR-0235）
+    # JSON 值表达不了重复的成员名，向量给的是原文；任何一层重复即不合法，含 value、details 与 inner 的内部（ADR-0236）
     for case in vector("primitives", "wire-encoding")["duplicates"]:
         with pytest.raises(FrameworkError) as raised:
             _read_text(case["target"], case.get("kind"), case["text"])
         assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT, case["name"]
-    assert _json.loads('{"a":1,"a":2}', reject_duplicates=False) == {"a": 2}
-    with pytest.raises(ValueError, match="more than once"):
-        _json.loads('{"a":[{"b":1,"b":2}]}')
+    with pytest.raises(_json.JsonTextError) as duplicate:
+        _json.parse('{"a":[{"b":1,"b":2}]}')
+    assert (duplicate.value.syntax, duplicate.value.path) == (False, "$.a[0].b")
 
 
 def _read_text(target: str, kind: str | None, text: str) -> object:

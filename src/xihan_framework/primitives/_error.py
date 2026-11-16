@@ -1,11 +1,10 @@
 """可恢复失败的描述（RFC-0001 Error）。"""
 
-import math
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Self
 
-from xihan_framework._json import JsonValue, dumps, loads
+from xihan_framework._json import JsonValue, dumps, parse
 from xihan_framework.primitives._error_code import (
     ERROR_CODE_INVALID_ARGUMENT,
     KIND_CANCELLED,
@@ -233,7 +232,7 @@ class Error:
     def from_json(cls, text: str | bytes) -> "Error":
         """从线上编码的 JSON 文本还原。"""
         try:
-            value = loads(text)
+            value = parse(text)
         except ValueError as error:
             raise _wire_error("The error is not valid JSON.") from error
         return cls.from_json_value(value)
@@ -308,14 +307,12 @@ def _freeze_details(details: Mapping[str, JsonValue] | None) -> Mapping[str, Jso
 
 
 def _check_json_value(value: object, path: str) -> None:
-    """细节值必须是 JSON 可表示的：``None``、布尔、整数、有限的浮点数、字符串、数组与键为字符串的对象。"""
-    if value is None or isinstance(value, (bool, int, str)):
-        return
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise FrameworkError(
-                ERROR_CODE_INVALID_ARGUMENT, f"The error detail '{path}' must be a finite number, got {value!r}."
-            )
+    """细节值必须是值模型里的值：``None``、布尔、整数、浮点、字符串、数组与键为字符串的对象。
+
+    非有限的浮点可以放进细节，写出时是字符串 ``NaN``、``Infinity``、``-Infinity``，与模板里的文本相同（RFC-0001「Result」，
+    ADR-0236）；超出 64 位的整数写出时按浮点。
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
         return
     if isinstance(value, Mapping):
         for name, member in value.items():

@@ -3,7 +3,7 @@
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, ClassVar, Final, Never, final
 
-from xihan_framework._json import JsonValue, dumps, loads
+from xihan_framework._json import JsonValue, dumps, parse
 from xihan_framework.primitives._error import Error
 from xihan_framework.primitives._error_code import ERROR_CODE_INVALID_ARGUMENT
 from xihan_framework.primitives._framework import FrameworkError
@@ -248,7 +248,7 @@ def _read(value: JsonValue) -> tuple[Mapping[str, JsonValue], Error | None]:
 def _parse(text: str | bytes) -> JsonValue:
     """解析结果的 JSON 文本。"""
     try:
-        return loads(text)
+        return parse(text)
     except ValueError as error:
         raise _wire_error("The result is not valid JSON.") from error
 

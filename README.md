@@ -1,6 +1,6 @@
 # XiHan Framework SDK for Python
 
-[XiHan Framework Spec](https://github.com/XiHanFun/framework-spec) 的 Python 实现：原语层、清单、调用上下文、管道与操作契约。语义与线上编码以规范为准（各语言 SDK 共用的线上细节、模板与内核错误由 ADR-0233 定下），与 .NET 参考实现（[XiHan.Framework](https://github.com/XiHanFun/XiHan.Framework)）一致，形状参照 Go SDK（[framework-sdk-go](https://github.com/XiHanFun/framework-sdk-go)）；规范以 submodule 放在 `spec/`，一致性由规范仓库的向量验证。面向 Python 应用、脚本型插件与 AI 工具链，Python 3.12+，运行时零依赖，处理器与中间件基于 asyncio。
+[XiHan Framework Spec](https://github.com/XiHanFun/framework-spec) 的 Python 实现：原语层、清单、调用上下文、管道与操作契约。语义与线上编码以规范为准，行为与 .NET 参考实现（[XiHan.Framework](https://github.com/XiHanFun/XiHan.Framework)）一致（结果取决于平台内部的地方由 ADR-0236 写死在规范里），形状参照 Go SDK（[framework-sdk-go](https://github.com/XiHanFun/framework-sdk-go)）；规范以 submodule 放在 `spec/`，一致性由规范仓库的向量验证。面向 Python 应用、脚本型插件与 AI 工具链，Python 3.12+，运行时零依赖，处理器与中间件基于 asyncio。
 
 ```bash
 pip install xihan-framework
@@ -71,12 +71,21 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-1. 可恢复失败返回 `fail(Error...)`，不抛异常；错误码按 `<领域大写>_<KIND>_<NNN>`，文案用消息键（最长 128 个字符）+ 参数，`Error.message` 先经 `set_default_messages(Catalog(...), locale)` 安装的目录解析，再找 SDK 自带的内核错误英文模板（`BUILT_IN_CATALOG`，与规范向量 kernel-messages 逐字相同，如 `Operation 'orders.create' is not registered.`），都解析不了时是 `键 (参数)`。模板按 RFC-0010「模板」：`{name}` / `{0}`，`{{` `}}` 转义，可移植的格式说明符 `D`、`X` / `x`、`F`、`N` 按不变文化格式化（`F` 与 `N` 按精确值舍入、正好一半取偶，`{n:F2}` 取 0.125 得 `0.12`），其他说明符（含 printf 风格的 `%05d`）按无格式输出；值的文本形式是布尔 `true` / `false`、`None` 空串、浮点在 1e-4 ≤ |x| < 1e17 时写最短往返的定点形式（整数值不带小数点，1e16 写 `10000000000000000`），范围外写 `1E+17`、`9.9E-05` 这样的形式，负零写 `-0`；`describe` 的参数按名字的 UTF-16 码元序排列。`format_message` 是宽松格式化（缺值的占位符原样保留），`try_format_message` 与 `Catalog` 是严格格式化（缺值即失败，退回描述）。配置与编程错误（非法参数、清单不合法、管道约束成环、操作重复登记）抛 `FrameworkError`，它是 `ValueError` 的子类，带错误码；操作重复登记与登记表已满的 `FrameworkError` 经 `to_error()` 交回带消息键与参数的错误（`kernel.operation.duplicate` / `kernel.operation.registry_full`）。
-2. 请求与响应是 dataclass（也可以是原语、`list` / `tuple` / 键为 `str` 的 `dict`、枚举、`X | None`、`Maybe[T]`、`TypedId` 子类，或自带 `from_json_value` / `to_json_value` 的类型），用标准库编解码；成员名用 `field(metadata=operation.json_field("ttlMs"))` 改写。载荷不合法返回 `KERNEL_VALIDATION_001`，`reason` 只写 JSON 路径：`null`、不是对象或根上不合时是 `$`，值的类型不符时是它的路径（`$.lines[1].quantity`），成员名含 `.`、空格、引号、括号、`/`、`\` 或几个空白控制字符时写 `$['unit price']`（名字不转义），语法错误时以 `$` 开头。
-3. 处理器与中间件都是 `async def`；`Invoker` 在 `Context.run` 里执行整条管道：截止时间到了取消协程并返回 `KERNEL_TIMEOUT_001`，`ctx.cancellation.cancel()`（可以在任何线程调用）取消协程并返回 `KERNEL_CANCELLED_001`，两者同时触发时报超时；任务被别处取消时 `CancelledError` 照常传播。中间件以成功短路、`handle` 没有执行时，`invoke` 与 `invoke_typed` 都返回 `KERNEL_UNEXPECTED_001` + `kernel.operation.no_response`，不返回成功的空载荷（RFC-0011 规则 9）。操作或中间件抛出的异常（`Exception`）翻译为 `KERNEL_UNEXPECTED_001` + `kernel.invocation.unhandled_exception`，上线的错误不带异常文本，完整异常经 `logging` 的 `xihan_framework.operation` 记下（规则 5）。
-4. 清单：`manifest.read(data)` / `manifest.read_file(path)` 解析并校验（未知字段、大小写不对的成员名、`null`、重复成员、类型不符、空的 `activation`、格式与跨字段约束都抛 `FrameworkError`；`Manifest.activation` 为 `None` 表示没写，缺省为 `onStartup`），`manifest.write(m)` 输出两空格缩进、字段按 Schema 顺序、缺省值省略的规范化 JSON。
+1. 可恢复失败返回 `fail(Error...)`，不抛异常；错误码按 `<领域大写>_<KIND>_<NNN>`，文案用消息键（最长 128 个字符）+ 参数，`Error.message` 先经 `set_default_messages(Catalog(...), locale)` 安装的目录解析，再找 SDK 自带的内核错误英文模板（`BUILT_IN_CATALOG`，与规范向量 kernel-messages 逐字相同，如 `Operation 'orders.create' is not registered.`），都解析不了时是 `键 (参数)`。配置与编程错误（非法参数、清单字段不合格式、管道约束成环、操作重复登记）抛 `FrameworkError`，它是 `ValueError` 的子类，带错误码；操作重复登记与登记表已满的 `FrameworkError` 经 `to_error()` 交回带消息键与参数的错误（`kernel.operation.duplicate` / `kernel.operation.registry_full`）。
+2. 模板按 RFC-0010「模板」：`{name}` / `{0}`，`{{` `}}` 转义。值先归到值模型（空、布尔、字符串、64 位整数、双精度浮点、数组、对象）：浮点在 1e-4 ≤ |x| < 1e17 时写最短往返的定点形式（整数值不带小数点，`2.0` 写 `2`），范围外写 `1E+17`、`9.9E-05` 这样的形式，负零写 `-0`，非数与无穷写 `NaN`、`Infinity`、`-Infinity`；数组与对象写成紧凑的 JSON，对象成员按名字的 UTF-16 码元序排列，超过 64 层的容器写 `null`。说明符只认 `D`、`X` / `x`、`F`、`N` 加至多两位精度（`F02` 即 `F2`），`D` 与 `X` 只用于整数（`X` 只用于非负整数），`F` 与 `N` 用于整数与浮点，按精确值舍入、正好一半取偶（`{n:F2}` 取 0.125 得 `0.12`）；其余说明符（`E2`、`0.00`、`yyyy-MM-dd`、printf 风格的 `%05d`）与不适用的场合一律按无格式写出。`format_message` / `try_format_message` / `format_argument` 可带 `locale`，`Catalog.resolve` 按请求的区域格式化：区域只改变小数点与分组符（de-DE、es-ES、pt-BR 是 `,` 与 `.`，fr-FR 是 `,` 与 U+202F，ru-RU 是 `,` 与 U+00A0，区域名不区分大小写，其余区域与不给区域都是 `.` 与 `,`），小数点用于无格式的浮点与 `F`、`N`，分组符只用于 `N`，`D`、`X` 与数组、对象里的数字不受区域影响。`describe` 不随区域变化，参数按名字的 UTF-16 码元序排列。`format_message` 是宽松格式化（缺值的占位符原样保留），`try_format_message` 与 `Catalog` 是严格格式化（缺值即失败，退回描述）。
+3. 请求与响应是 dataclass（也可以是原语、`list` / `tuple` / 键为 `str` 的 `dict`、枚举、`X | None`、`Maybe[T]`、`TypedId` 子类，或自带 `from_json_value` / `to_json_value` 的类型），用标准库编解码；成员名用 `field(metadata=operation.json_field("ttlMs"))` 改写。载荷不合法返回 `KERNEL_VALIDATION_001`，`reason` 只写 JSON 路径：`null`、不是对象或根上不合时是 `$`，值的类型不符时是它的路径（`$.lines[1].quantity`），成员名含 `.`、空格、引号、括号、`/`、`\` 或几个空白控制字符时写 `$['unit price']`（名字不转义），语法错误时以 `$` 开头。
+4. 处理器与中间件都是 `async def`；`Invoker` 在 `Context.run` 里执行整条管道：截止时间到了取消协程并返回 `KERNEL_TIMEOUT_001`，`ctx.cancellation.cancel()`（可以在任何线程调用）取消协程并返回 `KERNEL_CANCELLED_001`，两者同时触发时报超时；任务被别处取消时 `CancelledError` 照常传播。中间件以成功短路、`handle` 没有执行时，`invoke` 与 `invoke_typed` 都返回 `KERNEL_UNEXPECTED_001` + `kernel.operation.no_response`，不返回成功的空载荷（RFC-0011 规则 9）。操作或中间件抛出的异常（`Exception`）翻译为 `KERNEL_UNEXPECTED_001` + `kernel.invocation.unhandled_exception`，上线的错误不带异常文本，完整异常经 `logging` 的 `xihan_framework.operation` 记下（规则 5）。
+5. 清单：`manifest.read(data)` / `manifest.read_file(path)` 解析并校验（未知字段、大小写不对的成员名、`null`、重复成员、类型不符、空的 `activation`、格式与跨字段约束都抛 `FrameworkError`；`Manifest.activation` 为 `None` 表示没写，缺省为 `onStartup`），`manifest.write(m)` 输出两空格缩进、字段按 Schema 顺序、缺省值省略的规范化 JSON。
 
-`Result`、`Error`、`Maybe` 的 JSON 编码按 RFC-0001「Result」：有值成功 `{"ok":true,"value":…}`，无值成功（`success()`）只写 `{"ok":true}`，失败 `{"ok":false,"error":{…}}`。读取分三种：`Result.from_json_value`（有值，`value` 必填且不能是 `null`）、`Result.unit_from_json_value`（无值，带了 `value` 即拒绝，`{}` 与 `null` 也算）、`Result.maybe_from_json_value`（值是 `Maybe`，`null` 即无值）；`Error` 的 `message` 必填且非空，可选成员写成 `null` 不合法，未知成员忽略；从文本读取时同一层出现重复的成员名即不合法（清单同样如此；操作载荷里的重复成员后者覆盖前者）。写出的字节形式（浮点数的写法、`<` `>` `&` 的转义、映射键的排序）与 Go SDK 的 `encoding/json` 相同；这些规则与生命周期迁移表、管道阶段顺序、错误码、Baggage 键与能力依赖的文法都由 `spec/conformance/vectors` 验证。
+`Result`、`Error`、`Maybe` 的 JSON 编码按 RFC-0001「Result」：有值成功 `{"ok":true,"value":…}`，无值成功（`success()`）只写 `{"ok":true}`，失败 `{"ok":false,"error":{…}}`。读取分三种：`Result.from_json_value`（有值，`value` 必填且不能是 `null`）、`Result.unit_from_json_value`（无值，带了 `value` 即拒绝，`{}` 与 `null` 也算）、`Result.maybe_from_json_value`（值是 `Maybe`，`null` 即无值）；`Error` 的 `message` 必填且非空，可选成员写成 `null` 不合法，未知成员忽略；从文本读取时先过共同的 JSON 读取检查，任何一层出现重复的成员名即不合法，含 `value`、`details` 与 `inner` 的内部。数字按值模型往返：64 位范围内的整数原样（9007199254740993 不会变成 9007199254740992），整数值的浮点写成 `2.0`、`-0.0`、`1E+17`，读回来仍是浮点；非有限的浮点写成字符串 `NaN`、`Infinity`、`-Infinity`。这些规则与生命周期迁移表、管道阶段顺序、错误码、Baggage 键与能力依赖的文法都由 `spec/conformance/vectors` 验证。
+
+### Python 的映射
+
+规范把一部分写法交给各语言自己声明，Python 的写法如下。
+
+- **模板的值模型**：`None`、`bool`、`str`（含 `StrEnum` 等 `str` 的子类）、`int`（含 `IntEnum`；超出 64 位的是浮点）、`float`；`Decimal`、`Fraction` 等其他实数换成最接近的双精度浮点；`Mapping` 是对象（键取它的文本），`list`、`tuple` 与其他序列、`set` / `frozenset`、`bytes` 是数组。模型之外的值取 `str(value)`：`datetime(2026, 11, 16, 8, 30)` 写 `2026-11-16 08:30:00`，`UUID` 写带连字符的小写形式，普通 `Enum` 写 `Color.RED`；它们不跨语言，插件要跨语言格式化时先转成字符串。
+- **线上编码的值**：超出 64 位的 `int` 按值模型写成浮点（精度随之丢失），`float('nan')` 与无穷写成字符串。
+- **JSON 文本与文法**：读取不用 `json.loads`（它接受 `NaN`、孤立的代理项、重复成员与很深的嵌套），由 SDK 自己按 RFC 8259 读；`str` 里的代理项码点按不合法的 Unicode 处理。规范的正则一律 `re.fullmatch`，结尾的换行不会被放过。
 
 ## 开发
 
@@ -91,7 +100,7 @@ ruff check && ruff format --check && mypy && pytest
 
 ## 状态
 
-`0.1.0`（未发布）：`primitives`、`manifest`、`invocation`、`pipeline`、`operation` 五个包可用。进程外插件运行时 `plugin`（`xihan.plugin.v1`，基于 `grpc.aio`，以 extra `xihan-framework[plugin]` 引入 grpcio）与远程 Provider 的操作集（首个是 `caching.distributed@1`）规划中；Wasm 载体不在本 SDK 范围。
+`0.1.0`（未发布）：`primitives`、`manifest`、`invocation`、`pipeline`、`operation` 可用。进程外插件运行时 `plugin`（`xihan.plugin.v1`，基于 `grpc.aio`，以 extra `xihan-framework[plugin]` 引入 grpcio）与远程 Provider 的操作集（首个是 `caching.distributed@1`）规划中；Wasm 载体不在本 SDK 范围。
 
 ## 许可
 
