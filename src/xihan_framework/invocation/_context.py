@@ -420,18 +420,18 @@ class Context:
         return None
 
     async def run[T](self, call: Coroutine[Any, Any, Result[T]]) -> Result[T]:
-        """在截止时间与取消信号下执行协程，超时与取消翻译成失败结果。
+        """在截止时间与取消信号下执行协程，超时与取消翻译成失败结果；调用器的 Resilience 阶段内置步骤就是它。
 
-        进入前已过期（``kernel.invocation.deadline_before_start``）或已取消时不执行（关闭协程）。截止时间的定时器触发时取消协程并返回 ``KERNEL_TIMEOUT_001``；信号
-        触发时取消协程并返回 ``KERNEL_CANCELLED_001``；两者都触发时报超时。协程自己接住取消、写下 ``KERNEL_CANCELLED_001``
-        结果而定时器已触发时，改写为超时（RFC-0004「行为变化」）；它写下的其他结果原样返回。任务被别处取消（不是这个
-        信号）时 ``CancelledError`` 照常向外传播，不翻译成结果。
+        进入时截止时间已过即返回 ``KERNEL_TIMEOUT_001`` + ``kernel.invocation.deadline_before_start``，不执行（关闭协程）；
+        进入时不核对取消，已触发的信号在协程第一次让出时取消它（RFC-0011 规则 10，ADR-0236，与 .NET 的
+        ``DeadlineMiddleware`` 一致）。截止时间的定时器触发时取消协程并返回 ``KERNEL_TIMEOUT_001``；信号触发时取消协程并
+        返回 ``KERNEL_CANCELLED_001``；两者都触发时报超时。协程自己接住取消、写下 ``KERNEL_CANCELLED_001`` 结果而定时器
+        已触发时，改写为超时（RFC-0004「行为变化」）；它写下的其他结果原样返回。任务被别处取消（不是这个信号）时
+        ``CancelledError`` 照常向外传播，不翻译成结果。
         """
-        # 进入前的核对：截止时间已过报超时（用 deadline_before_start 的键），否则信号已触发报取消
-        error = deadline_before_start_error() if self.is_expired() else self.cancellation_error()
-        if error is not None:
+        if self.is_expired():
             call.close()
-            return fail(error)
+            return fail(deadline_before_start_error())
         try:
             task = asyncio.current_task()
         except RuntimeError:

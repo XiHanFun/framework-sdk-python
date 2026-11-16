@@ -411,15 +411,83 @@ def test_payload_reasons_follow_the_vectors(vector: Callable[[str, str], Any]) -
     )
 
 
-def test_deadlines_already_past_end_the_call_before_the_first_middleware() -> None:
-    # RFC-0011 规则 10（ADR-0235）：没有截止时间中间件的 SDK 由调用器在第一个中间件之前按时钟核对，构造上下文时不判断
-    seen: list[str] = []
-
-    async def observe(ctx: Context, next_step: Step) -> Result[Unit]:
-        seen.append("observe")
+def test_built_in_steps_sit_where_the_dotnet_middleware_does() -> None:
+    # RFC-0011 规则 10（ADR-0236）：三个内置步骤按归属 xihan.kernel.core 放在所在阶段的 Beginning，与同位置的其他中间件按
+    # 归属的序数序排序；End 位置的中间件都在它们之后
+    async def through(ctx: Context, next_step: Step) -> Result[Unit]:
         return await next_step(ctx)
 
-    invoker = new_invoker(Builder().use_at(pipeline.func("Observe", observe), PipelineStage.OBSERVE))
+    builder = (
+        Builder()
+        .use_at(pipeline.func("Late", through), PipelineStage.OBSERVE, pipeline.Placement.BEGINNING, "zeta.late.owner")
+        .use_at(pipeline.func("Early", through), PipelineStage.OBSERVE, pipeline.Placement.BEGINNING)
+        .use_at(pipeline.func("Limit", through), PipelineStage.RESILIENCE)
+        .use_at(pipeline.func("Check", through), PipelineStage.VALIDATE)
+        .use_at(pipeline.func("Gate", through), PipelineStage.INGRESS)
+    )
+    invoker = new_invoker(builder)
+    assert invoker.dump() == (
+        "ingress      Gate\n"
+        "observe      Early\n"
+        "observe      ObserveMiddleware\n"
+        "observe      Late\n"
+        "resilience   DeadlineMiddleware\n"
+        "resilience   Limit\n"
+        "validate     ValidationMiddleware\n"
+        "validate     Check\n"
+    )
+    built_ins = [item for item in invoker.describe() if item.owner == operation.KERNEL_OWNER]
+    assert [(item.stage, item.middleware) for item in built_ins] == [
+        (PipelineStage.OBSERVE, operation.OBSERVE_MIDDLEWARE),
+        (PipelineStage.RESILIENCE, operation.DEADLINE_MIDDLEWARE),
+        (PipelineStage.VALIDATE, operation.VALIDATION_MIDDLEWARE),
+    ]
+    assert all(item.placement is pipeline.Placement.BEGINNING for item in built_ins)
+    # 应用的构建器不变；与内置步骤重名是登记错误
+    assert "ObserveMiddleware" not in builder.dump()
+    with pytest.raises(FrameworkError) as raised:
+        new_invoker(Builder().use_at(pipeline.func(operation.VALIDATION_MIDDLEWARE, through), PipelineStage.VALIDATE))
+    assert raised.value.code == pipeline.ERROR_CODE_REGISTRATION
+
+
+def test_only_exceptions_after_the_observe_step_are_translated() -> None:
+    async def explode(ctx: Context, next_step: Step) -> Result[Unit]:
+        raise LookupError("boom")
+
+    translated = [
+        Builder().use_at(pipeline.func("Explode", explode), PipelineStage.OBSERVE),
+        Builder().use_at(pipeline.func("Explode", explode), PipelineStage.OBSERVE, pipeline.Placement.BEGINNING, "zz"),
+        Builder().use_at(pipeline.func("Explode", explode), PipelineStage.HANDLE),
+    ]
+    for builder in translated:
+        error = error_of(invoke(new_invoker(builder), Request("orders.create", b'{"quantity":1}')))
+        assert error.message_key == operation.MESSAGE_UNHANDLED_EXCEPTION
+    # 排在 ObserveMiddleware 之前的（Ingress 阶段，或 Observe 阶段 Beginning 上归属排在 xihan.kernel.core 之前的）原样交给调用方
+    passed_through = [
+        Builder().use_at(pipeline.func("Explode", explode), PipelineStage.INGRESS),
+        Builder().use_at(pipeline.func("Explode", explode), PipelineStage.OBSERVE, pipeline.Placement.BEGINNING),
+    ]
+    for builder in passed_through:
+        with pytest.raises(LookupError):
+            invoke(new_invoker(builder), Request("orders.create", b'{"quantity":1}'))
+
+
+def test_the_deadline_is_checked_when_entering_resilience() -> None:
+    # RFC-0011 规则 10（ADR-0236，撤销 ADR-0235 的“第一个中间件之前”）：Ingress 与 Observe 阶段照常执行，
+    # Resilience 阶段的 DeadlineMiddleware 进入时已到即结束，后面的中间件与处理器不执行；构造上下文时不判断
+    seen: list[str] = []
+
+    def record(name: str) -> Callable[[Context, Step], Any]:
+        async def step(ctx: Context, next_step: Step) -> Result[Unit]:
+            seen.append(name)
+            return await next_step(ctx)
+
+        return step
+
+    builder = Builder()
+    for stage in [PipelineStage.INGRESS, PipelineStage.OBSERVE, PipelineStage.RESILIENCE, PipelineStage.VALIDATE]:
+        builder.use_at(pipeline.func(stage.manifest_name, record(stage.manifest_name)), stage)
+    invoker = new_invoker(builder)
     expired = Context(timeout=-1)
     assert expired.cancellation_error() is not None, "constructing an expired context does not fail"
     raw = error_of(invoke(invoker, Request("orders.create", b'{"quantity":1}'), expired))
@@ -431,4 +499,46 @@ def test_deadlines_already_past_end_the_call_before_the_first_middleware() -> No
         assert error.code == ERROR_CODE_DEADLINE_EXCEEDED
         assert error.message_key == "kernel.invocation.deadline_before_start"
         assert error.message == "The invocation exceeded its deadline before it started."
-    assert seen == []
+    assert seen == ["ingress", "observe"] * 2
+    # 进入管道之前只核对未登记与类型不符：已过期的上下文上的这两种失败照常先报
+    missing = error_of(invoke(invoker, Request("orders.missing"), Context(timeout=-1)))
+    assert missing.code == operation.ERROR_CODE_NOT_FOUND
+    mismatch = asyncio.run(invoker.invoke_typed(Context(timeout=-1), "orders.create", Empty(), OrderCreated))
+    assert mismatch.error is not None
+    assert mismatch.error.code == operation.ERROR_CODE_TYPE_MISMATCH
+    # 进入时不核对取消：信号已触发而处理器不让出时照常完成，与 .NET 处理器不看令牌时一样
+    signal = Cancellation()
+    signal.cancel()
+    assert invoke(invoker, Request("orders.create", b'{"quantity":1}'), Context(cancellation=signal)).outcome.is_ok
+
+
+def test_payloads_are_decoded_in_the_validate_stage() -> None:
+    # 原始调用在 Validate 阶段的 ValidationMiddleware 解码（RFC-0011 规则 2、3）：之前的中间件看不到请求对象，
+    # 解码失败时之后的中间件不执行；类型化调用跳过解码，请求对象就是传入的那个
+    seen: list[tuple[str, object]] = []
+
+    def record(name: str) -> Callable[[Context, Step], Any]:
+        async def step(ctx: Context, next_step: Step) -> Result[Unit]:
+            seen.append((name, operation.decoded_request_of(ctx)))
+            return await next_step(ctx)
+
+        return step
+
+    builder = (
+        Builder()
+        .use_at(pipeline.func("Authorize", record("authorize")), PipelineStage.AUTHORIZE)
+        .use_at(pipeline.func("Check", record("validate")), PipelineStage.VALIDATE)
+    )
+    invoker = new_invoker(builder)
+    assert invoke(invoker, Request("orders.create", b'{"quantity":2}')).outcome.is_ok
+    assert seen == [("authorize", None), ("validate", CreateOrder(quantity=2))]
+    seen.clear()
+    assert error_of(invoke(invoker, Request("orders.create", b'{"quantity":"x"}'))).details == {
+        "id": "orders.create",
+        "reason": "$.quantity",
+    }
+    assert seen == [("authorize", None)]
+    seen.clear()
+    request = CreateOrder(quantity=3)
+    assert asyncio.run(invoker.invoke_typed(Context(), "orders.create", request, OrderCreated)).is_ok
+    assert seen == [("authorize", request), ("validate", request)]

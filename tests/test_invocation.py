@@ -12,6 +12,7 @@ from xihan_framework.invocation import (
     ERROR_CODE_CANCELLED,
     ERROR_CODE_DEADLINE_EXCEEDED,
     MESSAGE_CANCELLED,
+    MESSAGE_DEADLINE_BEFORE_START,
     MESSAGE_DEADLINE_EXCEEDED,
     Cancellation,
     Context,
@@ -143,24 +144,33 @@ def test_deadlines_convert_to_utc() -> None:
     assert Context().remaining_time() is None
 
 
-def test_expired_or_cancelled_contexts_do_not_start_the_call() -> None:
-    started: list[bool] = []
+def test_expired_contexts_do_not_start_the_call_but_cancelled_ones_do() -> None:
+    started: list[str] = []
 
-    async def call() -> Result[Unit]:
-        started.append(True)
+    async def call(name: str) -> Result[Unit]:
+        started.append(name)
         return success()
 
-    expired = Context(timeout=-1)
-    outcome = asyncio.run(expired.run(call()))
+    async def waits(name: str) -> Result[Unit]:
+        started.append(name)
+        await asyncio.sleep(5)
+        return success()
+
+    # 进入时截止时间已过：deadline_before_start，协程被关闭而不是丢下（filterwarnings=error 会把 never awaited 变成失败）
+    outcome = asyncio.run(Context(timeout=-1).run(call("expired")))
     assert outcome.error is not None
-    assert outcome.error.code == ERROR_CODE_DEADLINE_EXCEEDED
+    assert (outcome.error.code, outcome.error.message_key) == (
+        ERROR_CODE_DEADLINE_EXCEEDED,
+        MESSAGE_DEADLINE_BEFORE_START,
+    )
+    # 进入时不核对取消（RFC-0011 规则 10，ADR-0236）：已触发的信号在协程第一次让出时取消它，不让出的协程照常完成
     signal = Cancellation()
     signal.cancel()
-    outcome = asyncio.run(Context(cancellation=signal).run(call()))
+    assert asyncio.run(Context(cancellation=signal).run(call("cancelled"))).is_ok
+    outcome = asyncio.run(Context(cancellation=signal).run(waits("cancelled and waiting")))
     assert outcome.error is not None
     assert outcome.error.code == ERROR_CODE_CANCELLED
-    # 协程被关闭而不是丢下：filterwarnings=error 会把“never awaited”变成失败
-    assert started == []
+    assert started == ["cancelled", "cancelled and waiting"]
 
 
 def test_deadline_wins_when_both_fire() -> None:

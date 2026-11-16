@@ -316,3 +316,21 @@ def test_ordering_follows_the_vectors(vector: Callable[[str, str], Any]) -> None
             except FrameworkError as error:
                 raised_at, code = "sort", error.code
         assert (raised_at, code) == (case["at"], case["error"]), case["name"]
+
+
+def test_extend_appends_registrations_and_constraints() -> None:
+    # 调用器用它把内置步骤放在应用的中间件之前登记（RFC-0011 规则 10）：同归属时按登记顺序，约束照样生效
+    first = Builder().use_at(passthrough("A"), PipelineStage.OBSERVE, Placement.BEGINNING, "same.owner")
+    second = (
+        Builder()
+        .use_at(passthrough("B"), PipelineStage.OBSERVE, Placement.BEGINNING, "same.owner")
+        .use_at(passthrough("C"), PipelineStage.OBSERVE, Placement.BEGINNING, "same.owner")
+        .after("B", "C")
+    )
+    combined = Builder().extend(first).extend(second)
+    assert [descriptor.middleware for descriptor in combined.describe()] == ["A", "C", "B"]
+    assert [descriptor.middleware for descriptor in second.describe()] == ["C", "B"]
+    assert [descriptor.middleware for descriptor in first.describe()] == ["A"]
+    with pytest.raises(FrameworkError) as raised:
+        combined.extend(first)
+    assert raised.value.code == pipeline.ERROR_CODE_REGISTRATION

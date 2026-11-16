@@ -10,11 +10,13 @@ from typing import Any, Final, cast
 from xihan_framework._codec import DecodeError, compile_decoder, encode
 from xihan_framework._json import JsonTextError, JsonValue, dumps, parse
 from xihan_framework.invocation import Context, ItemKey
-from xihan_framework.pipeline import APP_OWNER, Builder, Step
+from xihan_framework.pipeline import APP_OWNER, Builder, Placement, Step, func
+from xihan_framework.pipeline import Descriptor as StepDescriptor
 from xihan_framework.primitives import (
     ERROR_CODE_INVALID_ARGUMENT,
     Error,
     FrameworkError,
+    PipelineStage,
     Result,
     Stability,
     Unit,
@@ -52,6 +54,15 @@ MESSAGE_REGISTRY_FULL: Final = "kernel.operation.registry_full"
 
 #: 登记表的容量。
 CAPACITY: Final = 10000
+
+#: 调用器内置步骤的归属：内核清单 ID，与 .NET 的内置中间件相同（RFC-0011 规则 10）。
+KERNEL_OWNER: Final = "xihan.kernel.core"
+#: Observe 阶段的内置步骤：把排在它之后的中间件与处理器抛出的异常翻译成 ``KERNEL_UNEXPECTED_001``。
+OBSERVE_MIDDLEWARE: Final = "ObserveMiddleware"
+#: Resilience 阶段的内置步骤：进入时核对截止时间，之后在截止时间与取消信号下执行（``Context.run``）。
+DEADLINE_MIDDLEWARE: Final = "DeadlineMiddleware"
+#: Validate 阶段的内置步骤：原始调用在这里把载荷解码成请求，类型化调用跳过。
+VALIDATION_MIDDLEWARE: Final = "ValidationMiddleware"
 
 # 暴露的协议名
 EXPOSE_HTTP: Final = "http"
@@ -191,7 +202,10 @@ class Descriptor:
         return self._response_type
 
     async def execute(self, ctx: Context, payload: bytes) -> Response:
-        """解码载荷、执行、编码响应；解码失败返回 ``KERNEL_VALIDATION_001``，不执行操作。"""
+        """解码载荷、执行、编码响应；解码失败返回 ``KERNEL_VALIDATION_001``，不执行操作。
+
+        不经过管道；调用器在 Validate 阶段解码、在管道的终点执行。
+        """
         request, invalid = self.decode(payload)
         if invalid is not None:
             return Response(fail(invalid))
@@ -299,9 +313,18 @@ class Registry:
 
 _logger = logging.getLogger("xihan_framework.operation")
 
+
+@dataclass(frozen=True, slots=True)
+class _Decoded:
+    """Validate 阶段解码好的请求；包一层是为了与“还没有解码”区分开。"""
+
+    value: object
+
+
 # 上下文对象袋里的键；只在本模块里写入
 _DESCRIPTOR: Final = ItemKey[Descriptor]("xihan.operation.descriptor")
 _REQUEST: Final = ItemKey[Request]("xihan.operation.request")
+_DECODED: Final = ItemKey[_Decoded | None]("xihan.operation.decoded")
 _RESPONSE: Final = ItemKey[bytes | None]("xihan.operation.response")
 _TERMINAL: Final = ItemKey[Step | None]("xihan.operation.terminal")
 
@@ -316,6 +339,12 @@ def request_of(ctx: Context) -> Request | None:
     return ctx.find_item(_REQUEST)
 
 
+def decoded_request_of(ctx: Context) -> object | None:
+    """解码好的请求对象（RFC-0011 规则 3）：原始调用在 Validate 阶段解码之后才有，类型化调用是传入的请求对象。"""
+    decoded = ctx.find_item(_DECODED)
+    return None if decoded is None else decoded.value
+
+
 def response_payload_of(ctx: Context) -> bytes | None:
     """``handle`` 阶段写回的响应载荷（成功时）。"""
     return ctx.find_item(_RESPONSE)
@@ -324,21 +353,55 @@ def response_payload_of(ctx: Context) -> bytes | None:
 class Invoker:
     """让操作经过完整管道执行：管道的终点在 ``handle`` 阶段之后分派当前操作。
 
-    每次调用都在 ``Context.run`` 里执行，截止时间与取消信号翻译成 ``KERNEL_TIMEOUT_001`` / ``KERNEL_CANCELLED_001``。
+    调用器带三个内置步骤，位置与 .NET 的内置中间件相同（RFC-0011 规则 10，ADR-0236）：都按归属 ``xihan.kernel.core``
+    放在所在阶段的 ``Beginning``，与同位置的其他中间件按 RFC-0004 的规则排序（归属的序数序，同归属按登记顺序，内置
+    步骤先登记）。
+
+    - Observe 阶段的 ``ObserveMiddleware``：排在它之后的中间件与处理器抛出的异常翻译为 ``KERNEL_UNEXPECTED_001`` +
+      ``kernel.invocation.unhandled_exception``（规则 5）；排在它之前的（Ingress 阶段，或 Observe 阶段 ``Beginning``
+      上归属排在 ``xihan.kernel.core`` 之前的）抛出的异常原样交给调用方。
+    - Resilience 阶段的 ``DeadlineMiddleware``：进入时截止时间已过即 ``KERNEL_TIMEOUT_001`` +
+      ``kernel.invocation.deadline_before_start``，不核对取消；之后的中间件与处理器在 ``Context.run`` 里执行，途中的
+      超时与取消按 RFC-0003 第 1 条归因。
+    - Validate 阶段的 ``ValidationMiddleware``：原始调用在这里解码载荷，失败即 ``KERNEL_VALIDATION_001``；类型化调用跳过。
+
+    进入管道之前只核对未登记（``KERNEL_NOTFOUND_001``）与类型化调用的类型不符（``KERNEL_VALIDATION_002``），按这个顺序。
     操作描述、请求与响应放在上下文的对象袋里，派生上下文共享对象袋，所以并发的调用各用自己的上下文。
     """
 
-    __slots__ = ("_registry", "_step")
+    __slots__ = ("_pipeline", "_registry", "_step")
 
     def __init__(self, registry: Registry, builder: Builder | None = None) -> None:
-        """用登记表与管道构建调用器；管道的排序错误在这里以 ``FrameworkError`` 抛出。"""
+        """用登记表与应用的管道构建调用器：先登记内置步骤，再接上 ``builder`` 的登记与约束（``builder`` 本身不变）。
+
+        应用的中间件与内置步骤重名、排序出错时以 ``FrameworkError`` 抛出（``KERNEL_PIPELINE_00x``）。
+        """
         self._registry = registry
-        self._step = (Builder() if builder is None else builder).build(_dispatch)
+        pipeline = Builder()
+        pipeline.use_at(func(OBSERVE_MIDDLEWARE, _observe), PipelineStage.OBSERVE, Placement.BEGINNING, KERNEL_OWNER)
+        pipeline.use_at(
+            func(DEADLINE_MIDDLEWARE, _deadline), PipelineStage.RESILIENCE, Placement.BEGINNING, KERNEL_OWNER
+        )
+        pipeline.use_at(
+            func(VALIDATION_MIDDLEWARE, _validate), PipelineStage.VALIDATE, Placement.BEGINNING, KERNEL_OWNER
+        )
+        if builder is not None:
+            pipeline.extend(builder)
+        self._pipeline = pipeline
+        self._step = pipeline.build(_dispatch)
 
     @property
     def registry(self) -> Registry:
         """登记表。"""
         return self._registry
+
+    def describe(self) -> list[StepDescriptor]:
+        """调用器实际执行的管道：内置步骤与应用的中间件，排好序。"""
+        return self._pipeline.describe()
+
+    def dump(self) -> str:
+        """按 ``xihan pipeline dump`` 的格式打印调用器实际执行的管道。"""
+        return self._pipeline.dump()
 
     async def invoke(self, ctx: Context, request: Request) -> Response:
         """执行一个 XGI 请求：未登记返回 ``KERNEL_NOTFOUND_001``（不进管道）；否则经完整管道执行。
@@ -348,12 +411,9 @@ class Invoker:
         descriptor = self._registry.find(request.id)
         if descriptor is None:
             return Response(fail(_not_found(request.id)))
-        ctx.set_item(_DESCRIPTOR, descriptor)
-        ctx.set_item(_REQUEST, request)
-        # 同一个上下文上先后的调用共享对象袋：清掉上一次的响应与类型化终点，免得短路的调用读到旧值
-        ctx.set_item(_RESPONSE, None)
-        ctx.set_item(_TERMINAL, None)
-        outcome = await self._run(ctx, request.id)
+        # 同一个上下文上先后的调用共享对象袋：清掉上一次的请求、响应与类型化终点，免得短路的调用读到旧值
+        self._enter(ctx, descriptor, request, None, None)
+        outcome = await self._step(ctx)
         if outcome.is_failed:
             return Response(outcome)
         payload = ctx.find_item(_RESPONSE)
@@ -365,7 +425,7 @@ class Invoker:
     async def invoke_typed[Req, Res](
         self, ctx: Context, id: str, request: Req, response_type: type[Res]
     ) -> Result[Res]:
-        """类型化入口：不经 JSON，直接以请求对象经完整管道执行。
+        """类型化入口：不经 JSON，直接以请求对象经完整管道执行，Validate 阶段不解码。
 
         请求不是登记的请求类型的实例、或 ``response_type`` 不是登记的响应类型时返回 ``KERNEL_VALIDATION_002``（参数只有
         ``id``）；管道成功结束却没有执行操作（中间件短路成功）时返回 ``KERNEL_UNEXPECTED_001``。
@@ -383,12 +443,9 @@ class Invoker:
             results.append(result)
             return result.unit()
 
-        ctx.set_item(_DESCRIPTOR, descriptor)
-        ctx.set_item(_REQUEST, Request(id))
-        ctx.set_item(_RESPONSE, None)
-        ctx.set_item(_TERMINAL, terminal)
+        self._enter(ctx, descriptor, Request(id), _Decoded(request), terminal)
         try:
-            outcome = await self._run(ctx, id)
+            outcome = await self._step(ctx)
         finally:
             ctx.set_item(_TERMINAL, None)
         if outcome.error is not None:
@@ -397,30 +454,69 @@ class Invoker:
             return fail(_no_response(id))
         return results[0]
 
-    async def _run(self, ctx: Context, id: str) -> Result[Unit]:
-        """在上下文的截止时间与取消信号下执行管道；未处理的异常翻译为 ``KERNEL_UNEXPECTED_001``（RFC-0011 规则 5）。
+    @staticmethod
+    def _enter(
+        ctx: Context, descriptor: Descriptor, request: Request, decoded: _Decoded | None, terminal: Step | None
+    ) -> None:
+        """把这次调用的描述、请求与终点放进对象袋，清掉上一次的解码结果与响应。"""
+        ctx.set_item(_DESCRIPTOR, descriptor)
+        ctx.set_item(_REQUEST, request)
+        ctx.set_item(_DECODED, decoded)
+        ctx.set_item(_RESPONSE, None)
+        ctx.set_item(_TERMINAL, terminal)
 
-        ``Exception`` 之外的 ``BaseException``（含 ``CancelledError``）照常传播；完整异常经 ``logging`` 记下，上线的
-        错误不带异常文本，``FrameworkError`` 以 ``to_error()`` 作内部错误，与 .NET 的 Observe 阶段一致。
-        """
-        try:
-            return await ctx.run(self._step(ctx))
-        except Exception as exception:
-            _logger.error("The operation '%s' raised an unhandled exception.", id, exc_info=exception)
-            inner = exception.to_error() if isinstance(exception, FrameworkError) else None
-            return fail(Error.unexpected(ERROR_CODE_UNEXPECTED, MESSAGE_UNHANDLED_EXCEPTION, None, inner))
+
+async def _observe(ctx: Context, next_step: Step) -> Result[Unit]:
+    """Observe 阶段的内置步骤：下游未处理的异常翻译为 ``KERNEL_UNEXPECTED_001``（RFC-0011 规则 5）。
+
+    ``Exception`` 之外的 ``BaseException``（含 ``CancelledError``）照常传播；完整异常经 ``logging`` 记下，上线的错误不带
+    异常文本，``FrameworkError`` 以 ``to_error()`` 作内部错误，与 .NET 的 ``ObserveMiddleware`` 一致。
+    """
+    try:
+        return await next_step(ctx)
+    except Exception as exception:
+        descriptor = current(ctx)
+        _logger.error(
+            "The operation '%s' raised an unhandled exception.",
+            None if descriptor is None else descriptor.id,
+            exc_info=exception,
+        )
+        inner = exception.to_error() if isinstance(exception, FrameworkError) else None
+        return fail(Error.unexpected(ERROR_CODE_UNEXPECTED, MESSAGE_UNHANDLED_EXCEPTION, None, inner))
+
+
+async def _deadline(ctx: Context, next_step: Step) -> Result[Unit]:
+    """Resilience 阶段的内置步骤：进入时核对截止时间，之后在截止时间与取消信号下执行下游。"""
+    return await ctx.run(next_step(ctx))
+
+
+async def _validate(ctx: Context, next_step: Step) -> Result[Unit]:
+    """Validate 阶段的内置步骤：原始调用解码载荷并放进对象袋，失败即结束；类型化调用已经有请求对象，跳过。"""
+    descriptor = current(ctx)
+    if descriptor is not None and ctx.find_item(_DECODED) is None:
+        request = request_of(ctx)
+        value, invalid = descriptor.decode(b"" if request is None else request.payload)
+        if invalid is not None:
+            return fail(invalid)
+        ctx.set_item(_DECODED, _Decoded(value))
+    return await next_step(ctx)
 
 
 async def _dispatch(ctx: Context) -> Result[Unit]:
-    """管道的终点：类型化调用执行它放进来的终点，否则执行当前操作并把响应载荷写回上下文。"""
+    """管道的终点：类型化调用执行它放进来的终点，否则以解码好的请求执行当前操作并把响应载荷写回上下文。"""
     terminal = ctx.find_item(_TERMINAL)
     if terminal is not None:
         return await terminal(ctx)
     descriptor = current(ctx)
     if descriptor is None:
         return fail(Error.not_found(ERROR_CODE_NOT_FOUND, MESSAGE_NOT_FOUND))
-    request = request_of(ctx)
-    response = await descriptor.execute(ctx, b"" if request is None else request.payload)
+    decoded = ctx.find_item(_DECODED)
+    if decoded is None:
+        # Validate 阶段的内置步骤总会先解码；没有解码结果时同样按规则 2 解码，不让处理器拿到未解码的载荷
+        request = request_of(ctx)
+        response = await descriptor.execute(ctx, b"" if request is None else request.payload)
+    else:
+        response = await descriptor._execute(ctx, decoded.value)
     if response.outcome.is_ok:
         ctx.set_item(_RESPONSE, response.payload)
     return response.outcome

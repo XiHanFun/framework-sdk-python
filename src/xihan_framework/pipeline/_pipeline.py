@@ -161,6 +161,18 @@ class Builder:
         self._constraints.append((other, middleware))
         return self
 
+    def extend(self, other: "Builder") -> Self:
+        """把另一个构建器的登记与约束接在本构建器的登记之后，登记顺序随之排在后面；``other`` 不变。
+
+        调用器用它把内置步骤放在应用的中间件之前登记（RFC-0011 规则 10）。与已有登记重复时抛出 ``KERNEL_PIPELINE_003``。
+        """
+        for registration in other._registrations:
+            descriptor = registration.descriptor
+            self._check_unique(descriptor)
+            self._registrations.append(_Registration(registration.middleware, descriptor, len(self._registrations)))
+        self._constraints.extend(other._constraints)
+        return self
+
     def describe(self) -> list[Descriptor]:
         """返回排序后的中间件描述。"""
         return [registration.descriptor for registration in self._sorted()]
@@ -200,12 +212,18 @@ class Builder:
                 f"The middleware '{middleware.name}' needs an owner: a manifest ID or '{APP_OWNER}'.",
             )
         descriptor = Descriptor(stage, middleware.name, instance, owner, placement)
-        # 同一类型的默认实例只登记一次、命名实例的名字在类型内唯一；与 .NET 一样在登记时报，不推迟到排序
-        for registration in self._registrations:
-            if (registration.descriptor.middleware, registration.descriptor.instance) == (middleware.name, instance):
-                raise _registration_error(f"the middleware '{descriptor.display}' is registered more than once")
+        self._check_unique(descriptor)
         self._registrations.append(_Registration(middleware, descriptor, len(self._registrations)))
         return self
+
+    def _check_unique(self, descriptor: Descriptor) -> None:
+        """同一类型的默认实例只登记一次、命名实例的名字在类型内唯一；与 .NET 一样在登记时报，不推迟到排序。"""
+        for registration in self._registrations:
+            if (registration.descriptor.middleware, registration.descriptor.instance) == (
+                descriptor.middleware,
+                descriptor.instance,
+            ):
+                raise _registration_error(f"the middleware '{descriptor.display}' is registered more than once")
 
     def _sorted(self) -> list[_Registration]:
         """按规则排序：先阶段；阶段内先位置，再归属，再登记顺序，最后按约束做稳定拓扑排序。"""

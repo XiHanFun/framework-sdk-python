@@ -1,12 +1,14 @@
 """操作契约与 XGI 消息（RFC-0011）：业务以操作为单位声明，调用器让它经过完整管道并在 ``handle`` 阶段执行。
 
 请求与响应是普通的 dataclass（或其他可解码的类型，见 ``Registry.add``），用标准库按 JSON 编解码，JSON 是 XGI 的规范编码；
-成员名可用 ``json_field`` 改写。处理器与调用器都是 ``async``。
+成员名可用 ``json_field`` 改写。处理器与调用器都是 ``async``。调用器带三个与 .NET 内置中间件同位置的内置步骤
+（``ObserveMiddleware``、``DeadlineMiddleware``、``ValidationMiddleware``，见 ``Invoker``）。
 """
 
 from xihan_framework._codec import json_field
 from xihan_framework.operation._operation import (
     CAPACITY,
+    DEADLINE_MIDDLEWARE,
     ERROR_CODE_DUPLICATE,
     ERROR_CODE_INVALID_PAYLOAD,
     ERROR_CODE_NOT_FOUND,
@@ -17,6 +19,7 @@ from xihan_framework.operation._operation import (
     EXPOSE_GRPC,
     EXPOSE_HTTP,
     EXPOSE_MCP,
+    KERNEL_OWNER,
     MESSAGE_DUPLICATE,
     MESSAGE_INVALID_PAYLOAD,
     MESSAGE_NO_RESPONSE,
@@ -24,6 +27,8 @@ from xihan_framework.operation._operation import (
     MESSAGE_REGISTRY_FULL,
     MESSAGE_TYPE_MISMATCH,
     MESSAGE_UNHANDLED_EXCEPTION,
+    OBSERVE_MIDDLEWARE,
+    VALIDATION_MIDDLEWARE,
     Contract,
     Descriptor,
     Handler,
@@ -33,6 +38,7 @@ from xihan_framework.operation._operation import (
     Response,
     Schema,
     current,
+    decoded_request_of,
     is_id,
     request_of,
     response_payload_of,
@@ -40,6 +46,7 @@ from xihan_framework.operation._operation import (
 
 __all__ = [
     "CAPACITY",
+    "DEADLINE_MIDDLEWARE",
     "ERROR_CODE_DUPLICATE",
     "ERROR_CODE_INVALID_PAYLOAD",
     "ERROR_CODE_NOT_FOUND",
@@ -50,6 +57,7 @@ __all__ = [
     "EXPOSE_GRPC",
     "EXPOSE_HTTP",
     "EXPOSE_MCP",
+    "KERNEL_OWNER",
     "MESSAGE_DUPLICATE",
     "MESSAGE_INVALID_PAYLOAD",
     "MESSAGE_NOT_FOUND",
@@ -57,6 +65,8 @@ __all__ = [
     "MESSAGE_REGISTRY_FULL",
     "MESSAGE_TYPE_MISMATCH",
     "MESSAGE_UNHANDLED_EXCEPTION",
+    "OBSERVE_MIDDLEWARE",
+    "VALIDATION_MIDDLEWARE",
     "Contract",
     "Descriptor",
     "Handler",
@@ -66,6 +76,7 @@ __all__ = [
     "Response",
     "Schema",
     "current",
+    "decoded_request_of",
     "is_id",
     "json_field",
     "request_of",
