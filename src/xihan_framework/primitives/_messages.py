@@ -25,7 +25,7 @@ _PLACEHOLDER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]*|[0-9]+")
 _PORTABLE_SPECIFIER = re.compile(r"([DdXxFfNn])([0-9]{0,9})")
 # 浮点在这个范围内写最短往返的定点形式（RFC-0010「值的文本形式」）
 _PLAIN_FLOAT_MIN: Final = 1e-4
-_PLAIN_FLOAT_MAX: Final = 1e15
+_PLAIN_FLOAT_MAX: Final = 1e17
 
 
 class _Placeholder(NamedTuple):
@@ -79,19 +79,24 @@ def positional(*values: object) -> dict[str, object]:
 
 
 def describe(key: str, arguments: Mapping[str, object] | None) -> str:
-    """没有文案时描述一个消息：``键 (k=v, ...)``，值按 ``format_argument`` 的文本形式，参数按名字排序；没有参数时就是键。"""
+    """没有文案时描述一个消息：``键 (k=v, ...)``，值按 ``format_argument`` 的文本形式；没有参数时就是键。
+
+    参数按名字的序数顺序排列，逐个 UTF-16 码元比较（RFC-0010，ADR-0235）：与 .NET 的 ``string.CompareOrdinal`` 相同，
+    基本多文种平面以外的字符排在 U+E000–U+FFFF 之前，与按码点比较不同。
+    """
     if not arguments:
         return key
-    parts = ", ".join(f"{name}={format_argument(arguments[name])}" for name in sorted(arguments))
+    parts = ", ".join(f"{name}={format_argument(arguments[name])}" for name in sorted(arguments, key=_utf16_order))
     return f"{key} ({parts})"
 
 
 def format_argument(value: object) -> str:
     """一个参数的文本形式（RFC-0010「值的文本形式」），无格式说明符时与 ``describe`` 用它。
 
-    字符串原样，整数十进制，布尔写 ``true`` / ``false``，``None`` 写空串；浮点在 1e-4 ≤ |x| < 1e15 或为 0 时写最短
-    往返的定点形式，整数值不带小数点（``2.0`` 写 ``2``）。范围之外的浮点、数组与对象规范不作规定：浮点写成 .NET 的
-    ``1E+15`` 形式，数组写 ``[a b]``，对象按键排序写 ``map[k:v]``，其他值用 ``str``。
+    字符串原样，整数十进制，布尔写 ``true`` / ``false``，``None`` 写空串；浮点在 1e-4 ≤ |x| < 1e17 或为 0 时写最短
+    往返的定点形式，整数值不带小数点（``2.0`` 写 ``2``，1e16 写 ``10000000000000000``），范围外写最短往返的有效数字
+    加 ``E``、符号与至少两位的指数（``1E+17``、``9.9E-05``、``5E-324``）；负零写 ``-0``，非数与无穷写 ``NaN``、
+    ``Infinity``、``-Infinity``。数组与对象规范不作规定：数组写 ``[a b]``，对象按键排序写 ``map[k:v]``，其他值用 ``str``。
     """
     if value is None:
         return ""
@@ -189,8 +194,13 @@ def _fixed(value: int | float, digits: int, *, grouping: bool) -> str:
     return format(rounded, ",f" if grouping else "f")
 
 
+def _utf16_order(name: str) -> bytes:
+    """按 UTF-16 码元比较的排序键：UTF-16BE 的字节序就是码元的序；孤立代理项原样计为一个码元。"""
+    return name.encode("utf-16-be", "surrogatepass")
+
+
 def _float_text(value: float) -> str:
-    """浮点的文本形式：范围内写最短往返的定点形式，范围外写 .NET 的指数形式。"""
+    """浮点的文本形式：范围内写最短往返的定点形式（Python 的 ``repr`` 到 1e16 就换成指数，所以自己写），范围外写 .NET 的指数形式。"""
     if math.isnan(value):
         return "NaN"
     if math.isinf(value):

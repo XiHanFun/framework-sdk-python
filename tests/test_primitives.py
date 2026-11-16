@@ -222,10 +222,15 @@ def test_arguments_follow_the_text_forms() -> None:
         (123456789.0, "123456789"),
         (999999999999999.9, "999999999999999.9"),
         (-0.0, "-0"),
-        # 下面是规范不作规定的形式：范围外的浮点写成 .NET 的指数形式，数组与对象沿用 Go 的写法
+        # 1e-4 ≤ |x| < 1e17 不用指数（Python 的 repr 到 1e16 就换成指数），范围外写 .NET 的指数形式（ADR-0235）
+        (1e15, "1000000000000000"),
+        (1e16, "10000000000000000"),
+        (1e17, "1E+17"),
         (0.00001, "1E-05"),
-        (1e15, "1E+15"),
         (float("inf"), "Infinity"),
+        (float("-inf"), "-Infinity"),
+        (float("nan"), "NaN"),
+        # 数组与对象规范不作规定，沿用 Go 的写法
         ([1, "a"], "[1 a]"),
         ({"b": 1, "a": 2}, "map[a:2 b:1]"),
     ]
@@ -491,3 +496,9 @@ def test_baggage_values_follow_the_vectors(vector: VectorLoader) -> None:
     # 长度按 UTF-16 码元计：基本多文种平面以外的字符算两个，按码点计会把 255 个 a 加一个表情算成 256
     assert primitives.is_baggage_value_acceptable("a" * 254 + "\U0001f600")
     assert not primitives.is_baggage_value_acceptable("a" * 255 + "\U0001f600")
+
+
+def test_describe_orders_arguments_by_utf16_code_units() -> None:
+    # U+FF5E 的码点比 U+1F600 小，但 UTF-16 的码元 0xFF5E 比代理项 0xD83D 大：按码元排，表情在前
+    assert primitives.describe("a.b", {"\uff5e": 1, "\U0001f600": 2}) == "a.b (\U0001f600=2, \uff5e=1)"
+    assert primitives.describe("a.b", {"b": 1, "B": 2, "a": 3}) == "a.b (B=2, a=3, b=1)"
