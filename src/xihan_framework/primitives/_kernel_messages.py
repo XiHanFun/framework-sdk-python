@@ -1,4 +1,4 @@
-"""SDK 自带的默认英文模板：SDK 与宿主共用的内核错误的消息键与 en-US 模板（RFC-0011「错误码」，ADR-0233）。
+"""SDK 自带的默认英文模板：SDK 与宿主共用的内核错误的消息键与 en-US 模板（RFC-0011「错误码」，ADR-0233），含清单读取的错误（ADR-0236）。
 
 模板与 ``spec/conformance/vectors/primitives/kernel-messages.json`` 逐字相同（取自 .NET 的 ``Localization/en-US.json``）；
 宿主收到插件的错误后按键用自己的目录再翻译。
@@ -28,6 +28,23 @@ BUILT_IN_CATALOG: Final = Catalog(
             "kernel.operation.no_response": "Operation '{id}' completed without producing a response.",
             "kernel.operation.duplicate": "Operation '{id}' is already registered by '{owner}'.",
             "kernel.operation.registry_full": "The operation registry has reached its capacity of {capacity}.",
+            "kernel.manifest.invalid_json": "The manifest is not valid JSON: {reason}",
+            "kernel.manifest.empty": "The manifest is empty.",
+            "kernel.manifest.file_missing": "Manifest file '{path}' does not exist.",
+            "kernel.manifest.invalid": "The manifest is not valid: {reason}",
+            "primitives.manifest.isolation_required": "Plugin manifest '{id}' must declare 'isolation'.",
+            "primitives.manifest.isolation_not_allowed": (
+                "Manifest '{id}' is not a plugin and must not declare 'isolation' or 'permissions'."
+            ),
+            "primitives.manifest.duplicate_provides": (
+                "Manifest '{id}' declares the same capability ID more than once in 'provides'."
+            ),
+            "primitives.manifest.duplicate_requires": (
+                "Manifest '{id}' declares the same capability ID more than once in 'requires'."
+            ),
+            "primitives.manifest.duplicate_bindings": (
+                "Manifest '{id}' declares the same binding name more than once in 'bindings'."
+            ),
         }
     }
 )

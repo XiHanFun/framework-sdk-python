@@ -3,11 +3,12 @@
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from xihan_framework import invocation, operation, pipeline, primitives
+from xihan_framework import invocation, manifest, operation, pipeline, primitives
 from xihan_framework.invocation import Context
 from xihan_framework.operation import Contract, Invoker, Registry, Request
 from xihan_framework.pipeline import Builder, Step
@@ -28,7 +29,19 @@ SDK_PAIRS = {
     (operation.ERROR_CODE_DUPLICATE, operation.MESSAGE_DUPLICATE),
     (operation.ERROR_CODE_REGISTRY_FULL, operation.MESSAGE_REGISTRY_FULL),
     (operation.ERROR_CODE_UNEXPECTED, operation.MESSAGE_UNHANDLED_EXCEPTION),
+    # 清单读取的错误（ADR-0236）：读取时码都是 KERNEL_CAPABILITY_006
+    (manifest.ERROR_CODE_INVALID_MANIFEST, manifest.MESSAGE_INVALID_JSON),
+    (manifest.ERROR_CODE_INVALID_MANIFEST, manifest.MESSAGE_EMPTY),
+    (manifest.ERROR_CODE_INVALID_MANIFEST, manifest.MESSAGE_FILE_MISSING),
+    (manifest.ERROR_CODE_INVALID_MANIFEST, manifest.MESSAGE_INVALID),
+    (manifest.ERROR_CODE_INVALID_MANIFEST, manifest.MESSAGE_ISOLATION_REQUIRED),
+    (manifest.ERROR_CODE_INVALID_MANIFEST, manifest.MESSAGE_ISOLATION_NOT_ALLOWED),
+    (manifest.ERROR_CODE_INVALID_MANIFEST, manifest.MESSAGE_DUPLICATE_PROVIDES),
+    (manifest.ERROR_CODE_INVALID_MANIFEST, manifest.MESSAGE_DUPLICATE_REQUIRES),
+    (manifest.ERROR_CODE_INVALID_MANIFEST, manifest.MESSAGE_DUPLICATE_BINDINGS),
 }
+
+MINIMAL = '"id":"xihan.a.b","version":"1.0.0","primitives":"1","stability":"stable"'
 
 
 @dataclass(frozen=True)
@@ -46,6 +59,23 @@ async def explode(ctx: Context, request: Ping) -> Result[Ping]:
 
 async def short_circuit(ctx: Context, next_step: Step) -> Result[Unit]:
     return success()
+
+
+def manifest_errors() -> list[Error]:
+    """逐个触发清单读取的错误。"""
+    texts = [
+        "{",
+        "null",
+        "{" + MINIMAL + ',"kind":"library"}',
+        "{" + MINIMAL + ',"kind":"plugin"}',
+        "{" + MINIMAL + ',"kind":"capability","isolation":"wasm"}',
+        "{" + MINIMAL + ',"kind":"capability","provides":[{"id":"a.b","version":"1"},{"id":"a.b","version":"2"}]}',
+        "{" + MINIMAL + ',"kind":"capability","requires":[{"id":"a.b","version":"1"},{"id":"a.b","version":"2"}]}',
+        "{" + MINIMAL + ',"kind":"capability","bindings":[{"name":"db","type":"queue"},{"name":"db","type":"blob"}]}',
+    ]
+    errors = [manifest.read(text).error for text in texts]
+    errors.append(manifest.read_file(Path("missing") / manifest.FILE_NAME).error)
+    return [error for error in errors if error is not None]
 
 
 def produced_errors() -> list[Error]:
@@ -81,6 +111,7 @@ def produced_errors() -> list[Error]:
         *errors,
         duplicate.value.to_error(),
         overflow.value.to_error(),
+        *manifest_errors(),
     ]
 
 
