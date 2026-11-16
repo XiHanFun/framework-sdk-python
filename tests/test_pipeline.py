@@ -1,6 +1,8 @@
 """pipeline 的测试：Go SDK 移植来的排序、约束、命名实例与短路用例，以及打印格式与快照语义。"""
 
 import asyncio
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -123,10 +125,11 @@ def test_cycles_and_bad_constraints_are_rejected() -> None:
     )
     assert_code(cross_stage, pipeline.ERROR_CODE_REGISTRATION)
 
-    duplicate = (
-        Builder().use_at(passthrough("A"), PipelineStage.VALIDATE).use_at(passthrough("A"), PipelineStage.VALIDATE)
-    )
-    assert_code(duplicate, pipeline.ERROR_CODE_REGISTRATION)
+    # 重复登记在登记时立即报，不推迟到排序（RFC-0004 排序规则第 8 条）
+    duplicate = Builder().use_at(passthrough("A"), PipelineStage.VALIDATE)
+    with pytest.raises(FrameworkError) as raised:
+        duplicate.use_at(passthrough("A"), PipelineStage.EGRESS)
+    assert raised.value.code == pipeline.ERROR_CODE_REGISTRATION
 
     with pytest.raises(FrameworkError) as raised:
         pipeline.parse_stage("middle")
@@ -144,14 +147,17 @@ def test_named_instances_are_distinct_but_ambiguous_for_type_constraints() -> No
     descriptors = builder.describe()
     assert descriptors[0].instance == "guard-a"
     assert descriptors[0].owner == "xihan.plugins.a"
-    builder.use_at(passthrough("Other"), PipelineStage.OBSERVE).before("Guard", "Other")
+    # 约束主体按名字有歧义时在声明时立即报（RFC-0004 排序规则第 8 条）；目标有歧义则在排序时报
+    builder.use_at(passthrough("Other"), PipelineStage.OBSERVE)
+    with pytest.raises(FrameworkError) as raised:
+        builder.before("Guard", "Other")
+    assert raised.value.code == pipeline.ERROR_CODE_REGISTRATION
+    builder.before("Other", "Guard")
     assert_code(builder, pipeline.ERROR_CODE_REGISTRATION)
-    duplicate = (
-        Builder()
-        .use_named_instance("x", passthrough("Guard"), PipelineStage.OBSERVE)
-        .use_named_instance("x", passthrough("Guard"), PipelineStage.OBSERVE)
-    )
-    assert "'Guard[x]'" in assert_code(duplicate, pipeline.ERROR_CODE_REGISTRATION).message
+    duplicate = Builder().use_named_instance("x", passthrough("Guard"), PipelineStage.OBSERVE)
+    with pytest.raises(FrameworkError) as raised:
+        duplicate.use_named_instance("x", passthrough("Guard"), PipelineStage.OBSERVE)
+    assert "'Guard[x]'" in raised.value.message
 
 
 def test_short_circuit_skips_downstream() -> None:
@@ -210,8 +216,13 @@ def test_registrations_need_names_owners_and_stages() -> None:
         Builder().use_at(passthrough("A"), PipelineStage.OBSERVE, Placement.END, "")
     with pytest.raises(FrameworkError):
         Builder().use_named_instance("", passthrough("A"), PipelineStage.OBSERVE)
+    # 阶段也可以写成清单里的名字；不认识的名字在登记时报 KERNEL_PIPELINE_002
+    assert Builder().use_at(passthrough("A"), "observe").describe()[0].stage is PipelineStage.OBSERVE
+    with pytest.raises(FrameworkError) as raised:
+        Builder().use_at(passthrough("A"), "bogus")
+    assert raised.value.code == pipeline.ERROR_CODE_UNKNOWN_STAGE
     with pytest.raises(TypeError):
-        Builder().use_at(passthrough("A"), "observe")  # type: ignore[arg-type]
+        Builder().use_at(passthrough("A"), 3)  # type: ignore[arg-type]
     assert str(Placement.BEGINNING) == "Beginning"
 
 
@@ -265,3 +276,43 @@ def test_constraint_subjects_must_be_registered_when_declared() -> None:
     builder = Builder().use_at(passthrough("A"), PipelineStage.VALIDATE).before("A", "B")
     builder.use_at(passthrough("B"), PipelineStage.VALIDATE)
     assert [descriptor.middleware for descriptor in builder.describe()] == ["A", "B"]
+
+
+TYPE_NAME = "Step"
+
+
+def _apply(builder: Builder, step: dict[str, Any]) -> None:
+    """执行向量里的一步：use 按名字登记一个实例，before / after 是 [主体, 目标] 的按名字约束。"""
+    if "use" in step:
+        placement = Placement[step["placement"].upper()]
+        builder.use_named_instance(step["use"], passthrough(TYPE_NAME), step["stage"], placement, step["owner"])
+    elif "before" in step:
+        builder.before(*step["before"])
+    else:
+        builder.after(*step["after"])
+
+
+def test_ordering_follows_the_vectors(vector: Callable[[str, str], Any]) -> None:
+    vectors = vector("pipeline", "ordering")
+    for case in vectors["cases"]:
+        builder = Builder()
+        for step in case["steps"]:
+            _apply(builder, step)
+        # 打印全文与 .NET 的 PipelineBuilder 逐字相同，{type} 换成这里给命名实例用的类型名
+        assert builder.dump() == case["dump"].replace("{type}", TYPE_NAME), case["name"]
+    for case in vectors["errors"]:
+        builder = Builder()
+        raised_at: int | str | None = None
+        code = None
+        for index, step in enumerate(case["steps"]):
+            try:
+                _apply(builder, step)
+            except FrameworkError as error:
+                raised_at, code = index, error.code
+                break
+        else:
+            try:
+                builder.describe()
+            except FrameworkError as error:
+                raised_at, code = "sort", error.code
+        assert (raised_at, code) == (case["at"], case["error"]), case["name"]

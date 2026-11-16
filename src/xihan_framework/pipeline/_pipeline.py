@@ -125,7 +125,7 @@ class Builder:
     def use_at(
         self,
         middleware: Middleware,
-        stage: PipelineStage,
+        stage: PipelineStage | str,
         placement: Placement = Placement.END,
         owner: str = APP_OWNER,
     ) -> Self:
@@ -136,7 +136,7 @@ class Builder:
         self,
         instance: str,
         middleware: Middleware,
-        stage: PipelineStage,
+        stage: PipelineStage | str,
         placement: Placement = Placement.END,
         owner: str = APP_OWNER,
     ) -> Self:
@@ -180,12 +180,17 @@ class Builder:
         self,
         middleware: Middleware,
         instance: str | None,
-        stage: PipelineStage,
+        stage: PipelineStage | str,
         placement: Placement,
         owner: str,
     ) -> Self:
-        """登记一个中间件。"""
-        if not isinstance(stage, PipelineStage):
+        """登记一个中间件；重复登记与未知阶段在这里立即报（RFC-0004 排序规则第 8 条）。
+
+        阶段可以是 ``PipelineStage`` 或清单里的阶段名，名字不认识即 ``KERNEL_PIPELINE_002``。
+        """
+        if isinstance(stage, str):
+            stage = parse_stage(stage)
+        elif not isinstance(stage, PipelineStage):
             raise TypeError(f"The stage of the middleware '{middleware.name}' must be a PipelineStage, got {stage!r}.")
         if not middleware.name:
             raise FrameworkError(ERROR_CODE_REGISTRATION, "A middleware needs a name.")
@@ -195,12 +200,15 @@ class Builder:
                 f"The middleware '{middleware.name}' needs an owner: a manifest ID or '{APP_OWNER}'.",
             )
         descriptor = Descriptor(stage, middleware.name, instance, owner, placement)
+        # 同一类型的默认实例只登记一次、命名实例的名字在类型内唯一；与 .NET 一样在登记时报，不推迟到排序
+        for registration in self._registrations:
+            if (registration.descriptor.middleware, registration.descriptor.instance) == (middleware.name, instance):
+                raise _registration_error(f"the middleware '{descriptor.display}' is registered more than once")
         self._registrations.append(_Registration(middleware, descriptor, len(self._registrations)))
         return self
 
     def _sorted(self) -> list[_Registration]:
         """按规则排序：先阶段；阶段内先位置，再归属，再登记顺序，最后按约束做稳定拓扑排序。"""
-        self._check_duplicates()
         # 约束按中间件名（实例名或类型名）引用：未登记、一个名字对应多个中间件、跨阶段都是登记错误
         resolved: list[tuple[_Registration, _Registration]] = []
         for first_name, second_name in self._constraints:
@@ -227,9 +235,8 @@ class Builder:
         ]
 
     def _check_subject(self, name: str) -> None:
-        """约束主体在声明时必须已登记（RFC-0004 排序规则第 7 条）；有歧义留到排序时报。"""
-        if not self._named(name):
-            raise _registration_error(f"the ordering constraint references the unregistered middleware '{name}'")
+        """约束主体在声明时必须已登记、按名字没有歧义（RFC-0004 排序规则第 7、8 条），否则立即报。"""
+        self._single(name)
 
     def _single(self, name: str) -> _Registration:
         """按名字取唯一的登记；没有、或一个名字对应多个中间件都是登记错误。"""
@@ -243,17 +250,6 @@ class Builder:
                 )
             raise _registration_error(f"the middleware name '{name}' refers to more than one middleware")
         return registrations[0]
-
-    def _check_duplicates(self) -> None:
-        """同一类型的默认实例只登记一次、命名实例的名字在类型内唯一。"""
-        seen: set[tuple[str, str | None]] = set()
-        for registration in self._registrations:
-            key = (registration.descriptor.middleware, registration.descriptor.instance)
-            if key in seen:
-                raise _registration_error(
-                    f"the middleware '{registration.descriptor.display}' is registered more than once"
-                )
-            seen.add(key)
 
 
 def parse_stage(name: str) -> PipelineStage:
