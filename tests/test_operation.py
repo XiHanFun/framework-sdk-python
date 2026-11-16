@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from xihan_framework import operation, pipeline
+from xihan_framework._json import JsonValue
 from xihan_framework.invocation import ERROR_CODE_CANCELLED, ERROR_CODE_DEADLINE_EXCEEDED, Cancellation, Context
 from xihan_framework.operation import Contract, Invoker, Registry, Request, Response, Schema, json_field
 from xihan_framework.pipeline import Builder, Step
@@ -101,7 +102,8 @@ def test_invoke_runs_the_pipeline_and_encodes_the_response() -> None:
         assert error_of(invalid).code == operation.ERROR_CODE_INVALID_PAYLOAD, payload
     empty = invoke(invoker, Request("orders.create"))
     assert error_of(empty).code == "ORDERS_VALIDATION_001", "an empty payload is {}"
-    assert error_of(invoke(invoker, Request("orders.create", b"  \n"))).code == "ORDERS_VALIDATION_001"
+    # 只有空载荷等价于 {}；只有空白不是 JSON（RFC-0001「JSON 文本」，ADR-0236）
+    assert error_of(invoke(invoker, Request("orders.create", b"  \n"))).code == operation.ERROR_CODE_INVALID_PAYLOAD
 
 
 def test_invalid_payloads_report_only_the_json_path() -> None:
@@ -276,16 +278,23 @@ def test_renamed_members_and_unencodable_responses() -> None:
     async def refresh(ctx: Context, request: Refresh) -> Result[Refresh]:
         return ok(request)
 
-    async def broken(ctx: Context, request: Empty) -> Result[float]:
-        return ok(float("nan"))
+    async def special(ctx: Context, request: Empty) -> Result[list[float]]:
+        return ok([float("nan"), 2.0])
+
+    async def broken(ctx: Context, request: Empty) -> Result[object]:
+        return ok(object())
 
     registry.add(Contract("cache-entries.try-refresh"), refresh, request_type=Refresh, response_type=Refresh)
-    registry.add(Contract("numbers.get"), broken, request_type=Empty, response_type=float)
+    registry.add(Contract("numbers.list"), special, request_type=Empty, response_type=list)
+    registry.add(Contract("numbers.get"), broken, request_type=Empty, response_type=object)
     invoker = Invoker(registry)
     response = invoke(invoker, Request("cache-entries.try-refresh", b'{"key":"k","ttlMs":500,"unknown":true}'))
     assert response.payload == b'{"key":"k","ttlMs":500}'
+    # 缺少必填成员报所在对象的路径（RFC-0011 规则 2，ADR-0236）
     missing = invoke(invoker, Request("cache-entries.try-refresh", b'{"key":"k","ttl_ms":500}'))
-    assert error_of(missing).details == {"id": "cache-entries.try-refresh", "reason": "$.ttlMs"}
+    assert error_of(missing).details == {"id": "cache-entries.try-refresh", "reason": "$"}
+    # 响应按值模型写：非有限的浮点写成字符串，整数值的浮点带 .0
+    assert invoke(invoker, Request("numbers.list")).payload == b'["NaN",2.0]'
     unencodable = error_of(invoke(invoker, Request("numbers.get")))
     assert unencodable.code == operation.ERROR_CODE_UNEXPECTED
     assert unencodable.message.startswith("The response of 'numbers.get' could not be encoded:")
@@ -342,43 +351,63 @@ def test_unhandled_exceptions_become_unexpected_errors(caplog: pytest.LogCapture
 
 @dataclass(frozen=True)
 class ReasonLine:
-    quantity: int
+    quantity: int = 0
 
 
 @dataclass(frozen=True)
 class ReasonOrder:
-    lines: list[ReasonLine]
+    lines: list[ReasonLine] | None = None
+
+
+@dataclass(frozen=True)
+class ReasonInner:
+    n: int
+
+
+@dataclass(frozen=True)
+class ReasonProfile:
+    """向量的 profile：没有缺省值的字段是必填的，要接受 null 的字符串、数组与对象写成 X | None。"""
+
+    name: str | None
+    note: str | None = None
+    count: int = 0
+    ratio: float = 0.0
+    flag: bool = False
+    tags: list[str | None] | None = None
+    scores: list[int] | None = None
+    inner: ReasonInner | None = None
+    meta: JsonValue = None
 
 
 def test_payload_reasons_follow_the_vectors(vector: Callable[[str, str], Any]) -> None:
-    # 向量的两个请求类型：counts 是整数字典，order 是 { lines: [ { quantity: 整数 } ] }
+    # 向量的三个请求类型：counts 是整数字典，order 是 { lines: [ { quantity: 整数 } ] }，profile 见上；reason 为 null 即解码成功
     vectors = vector("operations", "payload-reasons")
     registry = Registry()
 
-    async def count(ctx: Context, request: dict[str, int]) -> Result[dict[str, int]]:
+    async def echo(ctx: Context, request: object) -> Result[object]:
         return ok(request)
 
-    async def place(ctx: Context, request: ReasonOrder) -> Result[ReasonOrder]:
-        return ok(request)
-
-    registry.add(Contract("counts.set"), count, request_type=dict[str, int], response_type=dict[str, int])
-    registry.add(Contract("orders.place"), place, request_type=ReasonOrder, response_type=ReasonOrder)
+    types: dict[str, Any] = {"counts": dict[str, int], "order": ReasonOrder, "profile": ReasonProfile}
+    for name, request_type in types.items():
+        registry.add(Contract(f"{name}.check"), echo, request_type=request_type, response_type=request_type)
     invoker = Invoker(registry)
-    ids = {"counts": "counts.set", "order": "orders.place"}
     for case in vectors["cases"]:
-        error = error_of(invoke(invoker, Request(ids[case["request"]], case["payload"].encode("utf-8"))))
+        id = f"{case['request']}.check"
+        response = invoke(invoker, Request(id, case["payload"].encode("utf-8")))
+        if case["reason"] is None:
+            assert response.outcome.is_ok, case["name"]
+            continue
+        error = error_of(response)
         assert error.code == operation.ERROR_CODE_INVALID_PAYLOAD, case["name"]
         assert error.message_key == operation.MESSAGE_INVALID_PAYLOAD
-        assert error.details == {"id": ids[case["request"]], "reason": case["reason"]}, case["name"]
-    for case in vectors["syntaxErrors"]:
-        error = error_of(invoke(invoker, Request(ids[case["request"]], case["payload"].encode("utf-8"))))
-        assert error.code == operation.ERROR_CODE_INVALID_PAYLOAD, case["payload"]
-        assert error.details is not None
-        reason = error.details["reason"]
-        assert isinstance(reason, str)
-        assert reason.startswith("$"), case["payload"]
+        assert error.details == {"id": id, "reason": case["reason"]}, case["name"]
     assert (
-        invoke(invoker, Request("orders.place", b'{"lines":[{"quantity":2}]}')).payload == b'{"lines":[{"quantity":2}]}'
+        invoke(invoker, Request("order.check", b'{"lines":[{"quantity":2}]}')).payload == b'{"lines":[{"quantity":2}]}'
+    )
+    profile = invoke(invoker, Request("profile.check", b'{"name":null,"ratio":5,"tags":["x",null]}')).payload
+    assert profile == (
+        b'{"name":null,"note":null,"count":0,"ratio":5.0,"flag":false,"tags":["x",null],"scores":null,'
+        b'"inner":null,"meta":null}'
     )
 
 

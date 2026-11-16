@@ -10,7 +10,6 @@
 ``-Infinity``，超出 64 位的整数按浮点写出，让对方按同一模型读回同一个值。字符串按 RFC-0010 的 JSON 字符串写法转义。
 """
 
-import json
 import math
 import re
 from collections.abc import Mapping, Sequence
@@ -84,30 +83,6 @@ def parse(text: str | bytes) -> JsonValue:
     if reader.duplicate is not None:
         raise JsonTextError(False, reader.duplicate)
     return value
-
-
-def loads(text: str | bytes, *, reject_duplicates: bool = True) -> JsonValue:
-    """旧的读取入口（过渡）：标准库解析，拒绝 ``NaN`` 与 BOM；清单与操作载荷改用 ``parse`` 之后删掉。"""
-    if isinstance(text, bytes):
-        text = text.decode("utf-8")
-    hook = _unique_members if reject_duplicates else None
-    value: JsonValue = json.loads(text, parse_constant=_reject_constant, object_pairs_hook=hook)
-    return value
-
-
-def _unique_members(members: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
-    """组装一个 JSON 对象，成员名重复即 ``ValueError``。"""
-    result: dict[str, JsonValue] = {}
-    for name, value in members:
-        if name in result:
-            raise ValueError(f"The JSON object has the member '{name}' more than once.")
-        result[name] = value
-    return result
-
-
-def _reject_constant(name: str) -> JsonValue:
-    """拒绝 ``NaN``、``Infinity``、``-Infinity``：它们不是 JSON。"""
-    raise ValueError(f"'{name}' is not valid JSON.")
 
 
 def member_path(path: str, name: str) -> str:

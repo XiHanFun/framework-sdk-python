@@ -8,7 +8,7 @@ from dataclasses import KW_ONLY, dataclass
 from typing import Any, Final, cast
 
 from xihan_framework._codec import DecodeError, compile_decoder, encode
-from xihan_framework._json import JsonValue, dumps, loads
+from xihan_framework._json import JsonTextError, JsonValue, dumps, parse
 from xihan_framework.invocation import Context, ItemKey
 from xihan_framework.pipeline import APP_OWNER, Builder, Step
 from xihan_framework.primitives import (
@@ -114,8 +114,8 @@ class Schema:
         """核对两段都是 JSON 对象。"""
         for name, text in (("request", self.request), ("response", self.response)):
             try:
-                value = loads(text)
-            except ValueError as error:
+                value = parse(text)
+            except JsonTextError as error:
                 raise FrameworkError(ERROR_CODE_INVALID_ARGUMENT, f"The {name} schema is not valid JSON.") from error
             if not isinstance(value, dict):
                 raise FrameworkError(ERROR_CODE_INVALID_ARGUMENT, f"The {name} schema must be a JSON object.")
@@ -192,9 +192,29 @@ class Descriptor:
 
     async def execute(self, ctx: Context, payload: bytes) -> Response:
         """解码载荷、执行、编码响应；解码失败返回 ``KERNEL_VALIDATION_001``，不执行操作。"""
-        request, invalid = self._decode_payload(payload)
+        request, invalid = self.decode(payload)
         if invalid is not None:
             return Response(fail(invalid))
+        return await self._execute(ctx, request)
+
+    def decode(self, payload: bytes) -> tuple[object, Error | None]:
+        """解码请求载荷（RFC-0011 规则 2）：成功时为 ``(请求, None)``，不合法时为 ``(None, KERNEL_VALIDATION_001)``。
+
+        空载荷等价于 ``{}``。先过共同的 JSON 读取检查：语法错误（含只有空白、BOM、嵌套超过 64 层、非法 UTF-8、孤立的
+        代理项）的 ``reason`` 写 ``$``，任何一层有重复成员时写第一处重复的路径；再按请求类型解码，``reason`` 是第一处
+        不符的路径，缺少必填成员时是所在对象的路径；载荷是 ``null`` 或不是对象时写 ``$``。
+        """
+        try:
+            value: JsonValue = parse(payload or b"{}")
+        except JsonTextError as error:
+            return None, self._invalid_payload(error.path)
+        try:
+            return self._decode(value), None
+        except DecodeError as error:
+            return None, self._invalid_payload(error.path)
+
+    async def _execute(self, ctx: Context, request: object) -> Response:
+        """以解码好的请求执行，编码成功的响应。"""
         result = await self._handler(ctx, request)
         if result.error is not None:
             return Response(fail(result.error))
@@ -205,22 +225,6 @@ class Descriptor:
                 fail(Error.literal(ERROR_CODE_UNEXPECTED, f"The response of '{self.id}' could not be encoded: {error}"))
             )
         return Response(success(), encoded)
-
-    def _decode_payload(self, payload: bytes) -> tuple[object, Error | None]:
-        """解码请求载荷：空等价于 ``{}``；非 JSON、``null`` 或类型不匹配为 ``KERNEL_VALIDATION_001``，``reason`` 只写 JSON 路径，根上的错误写 ``$``。"""
-        text = payload.strip() or b"{}"
-        if text == b"null":
-            # null 不是请求对象：reason 写根路径 $（RFC-0011 规则 2，ADR-0235；以前写英文短语）
-            return None, self._invalid_payload("$")
-        try:
-            # 载荷里的重复成员规范没有规定：照 System.Text.Json 的缺省，后出现的覆盖先出现的
-            value: JsonValue = loads(text, reject_duplicates=False)
-        except ValueError:
-            return None, self._invalid_payload("$")
-        try:
-            return self._decode(value), None
-        except DecodeError as error:
-            return None, self._invalid_payload(error.path)
 
     def _invalid_payload(self, reason: str) -> Error:
         """载荷不合法的错误。"""

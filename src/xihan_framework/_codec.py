@@ -1,14 +1,20 @@
-"""值与 JSON 值之间的编解码（内部模块）：标准库实现，规则对齐 Go SDK 的 ``encoding/json``。
+"""值与 JSON 值之间的编解码（内部模块）：标准库实现。
 
 编码按值的运行期类型：原语原样；有 ``to_json_value()`` 的对象（SDK 的原语与用户类型）用它；枚举取 ``value``；
 dataclass 按字段声明顺序写成对象（名字可由 ``json_field`` 改写，``_`` 开头的字段不写）；映射按键的字典序；
 列表与元组写成数组。
 
-解码按目标类型先编译成解码函数（注册时就发现不支持的类型），载荷不符时抛出 ``DecodeError``，只带 JSON 路径
-（``$.quantity``）而不带类型名（RFC-0011 规则 2）。支持 ``bool`` / ``int`` / ``float`` / ``str`` / ``None``、
-``X | None``、``Literal``、``Annotated``、``list`` / ``Sequence`` / ``tuple``、键为 ``str`` 的 ``dict`` / ``Mapping``、
-dataclass、枚举、``TypedId`` 子类、``Maybe``、``Result``、``Unit``、``Error``、``JsonValue`` / ``Any``，以及定义了
-``from_json_value(value)`` 类方法的类型。dataclass 的未知成员忽略；没有缺省值的字段是必填的，``Maybe`` 字段缺省为无值。
+解码按目标类型先编译成解码函数（注册时就发现不支持的类型），输入是过了共同检查的 JSON 值（``_json.parse``），
+按 RFC-0011 规则 2 的语义解码（ADR-0236）：对象的成员按文本顺序逐个解码，第一处不符即抛出 ``DecodeError``，只带
+JSON 路径（``$.quantity``）而不带类型名；必填成员（没有缺省值的字段）缺少时，在对象的成员都解码完之后报该对象的路径，
+值为 ``null`` 也算出现；未知成员忽略，成员名区分大小写。``int`` 是 64 位有符号整数，不接受 ``1.0``、``1e2`` 与超出范围的
+整数；``float`` 也接受整数写法；数字不从字符串读，布尔不是数字。只有 ``X | None``、``Maybe``、``JsonValue`` / ``Any``
+接受 ``null``，其余类型（含 ``str``、``list``、dataclass）遇到 ``null`` 即不符。
+
+支持 ``bool`` / ``int`` / ``float`` / ``str`` / ``None``、``X | None``、``Literal``、``Annotated``、``list`` /
+``Sequence`` / ``tuple``、键为 ``str`` 的 ``dict`` / ``Mapping``、dataclass、枚举、``TypedId`` 子类、``Maybe``、
+``Result``、``Unit``、``Error``、``JsonValue`` / ``Any``，以及定义了 ``from_json_value(value)`` 类方法的类型。
+``Maybe`` 字段没有缺省值时缺省为无值，不算必填。
 """
 
 import dataclasses
@@ -17,7 +23,7 @@ from collections.abc import Callable, Mapping, MutableSequence, Sequence
 from enum import Enum
 from typing import Annotated, Any, Final, Literal, TypeAliasType, Union, get_args, get_origin, get_type_hints
 
-from xihan_framework._json import JsonValue
+from xihan_framework._json import INT64_MAX, INT64_MIN, JsonValue, member_path
 from xihan_framework.primitives._id import TypedId
 from xihan_framework.primitives._maybe import Maybe
 from xihan_framework.primitives._result import Result, Unit
@@ -28,9 +34,6 @@ JSON_NAME: Final = "xihan.json.name"
 JSON_OMIT_NONE: Final = "xihan.json.omit_none"
 
 type Decoder = Callable[[JsonValue, str], object]
-
-# 成员名含这些字符时路径写成 ['名字']；U+0085、U+2028、U+2029 用 chr 写出，源码里不放不可见字符
-_BRACKETED_CHARACTERS: Final = frozenset(". '/\"[]()\\\t\n\r\f\b") | {chr(0x85), chr(0x2028), chr(0x2029)}
 
 
 class DecodeError(Exception):
@@ -251,7 +254,7 @@ def _compile_mapping(target: object, arguments: tuple[object, ...], cache: dict[
     def decode(value: JsonValue, path: str) -> object:
         if not isinstance(value, Mapping):
             raise DecodeError(path, "expected an object")
-        return {name: inner(member, _member_path(path, name)) for name, member in value.items()}
+        return {name: inner(member, member_path(path, name)) for name, member in value.items()}
 
     return decode
 
@@ -354,48 +357,40 @@ def _compile_enum(target: type[Enum]) -> Decoder:
 
 
 def _compile_dataclass(target: type, cache: dict[object, Decoder]) -> Decoder:
-    """dataclass：按字段（或 ``json_field`` 改写的名字）取成员，未知成员忽略。"""
+    """dataclass：成员按文本顺序解码，未知成员忽略；对象结束时核对必填成员（RFC-0011 规则 2）。"""
     hints = get_type_hints(target, include_extras=True)
-    specs: list[tuple[str, str, Decoder, bool, bool]] = []
+    members: dict[str, tuple[str, Decoder]] = {}
+    required: list[str] = []
+    absent_maybes: list[str] = []
     for field in dataclasses.fields(target):
         if not field.init or field.name.startswith("_"):
             continue
         hint = hints[field.name]
-        required = field.default is dataclasses.MISSING and field.default_factory is dataclasses.MISSING
-        is_maybe = hint is Maybe or get_origin(hint) is Maybe
-        specs.append(
-            (field.name, str(field.metadata.get(JSON_NAME, field.name)), _compile(hint, cache), required, is_maybe)
-        )
+        members[str(field.metadata.get(JSON_NAME, field.name))] = (field.name, _compile(hint, cache))
+        if field.default is dataclasses.MISSING and field.default_factory is dataclasses.MISSING:
+            # 没有缺省值的 Maybe 字段缺少时为无值，不算必填
+            (absent_maybes if hint is Maybe or get_origin(hint) is Maybe else required).append(field.name)
 
     def decode(value: JsonValue, path: str) -> object:
         if not isinstance(value, Mapping):
             raise DecodeError(path, "expected an object")
         arguments: dict[str, object] = {}
-        for name, member_name, decoder, required, is_maybe in specs:
-            member_path = _member_path(path, member_name)
-            if member_name in value:
-                arguments[name] = decoder(value[member_name], member_path)
-            elif is_maybe and required:
-                arguments[name] = Maybe.none()
-            elif required:
-                raise DecodeError(member_path, "the property is required")
+        for name, member in value.items():
+            spec = members.get(name)
+            if spec is not None:
+                arguments[spec[0]] = spec[1](member, member_path(path, name))
+        # 缺少的成员在对象结束时才发现，报所在对象的路径
+        for name in required:
+            if name not in arguments:
+                raise DecodeError(path, f"the required member for the field '{name}' is missing")
+        for name in absent_maybes:
+            arguments.setdefault(name, Maybe.none())
         try:
             return target(**arguments)
         except (TypeError, ValueError) as error:
             raise DecodeError(path, str(error)) from error
 
     return decode
-
-
-def _member_path(path: str, name: str) -> str:
-    """对象成员的 JSON 路径（RFC-0011 规则 2，照 System.Text.Json 的实测）。
-
-    名字含 ``.``、空格、``'``、``/``、``"``、``[``、``]``、``(``、``)``、``\\``、制表、换行、回车、换页、退格、U+0085、
-    U+2028、U+2029 之一时写成 ``$['名字']``，名字原样、不转义；其余写成 ``$.名字``，空名字写成 ``$.``。
-    """
-    if any(character in _BRACKETED_CHARACTERS for character in name):
-        return f"{path}['{name}']"
-    return f"{path}.{name}"
 
 
 def _identity(value: JsonValue, path: str) -> object:
@@ -418,9 +413,9 @@ def _boolean(value: JsonValue, path: str) -> object:
 
 
 def _integer(value: JsonValue, path: str) -> object:
-    """只接受整数；``1.0`` 与布尔都不算，与 Go 解码进 int 一致。"""
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise DecodeError(path, "expected an integer")
+    """只接受 64 位范围内的整数；``1.0``、``1e2`` 按值模型是浮点，布尔也不算。"""
+    if not isinstance(value, int) or isinstance(value, bool) or not INT64_MIN <= value <= INT64_MAX:
+        raise DecodeError(path, "expected a 64-bit integer")
     return value
 
 

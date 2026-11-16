@@ -89,23 +89,45 @@ def test_dataclasses_round_trip_with_renamed_members() -> None:
 def test_decoding_reports_only_the_json_path() -> None:
     cases: list[tuple[JsonValue, str]] = [
         ([1], "$"),
-        ({"color": "red", "stability": "stable"}, "$.lines"),
+        # 缺少必填成员报所在对象的路径（RFC-0011 规则 2，ADR-0236）
+        ({"color": "red", "stability": "stable"}, "$"),
+        ({"lines": [{"sku": "s1"}], "color": "red", "stability": "stable"}, "$.lines[0]"),
         ({"lines": [{"sku": "s1", "quantity": "2"}], "color": "red", "stability": "stable"}, "$.lines[0].quantity"),
         ({"lines": [{"sku": "s1", "quantity": 1.0}], "color": "red", "stability": "stable"}, "$.lines[0].quantity"),
         ({"lines": [], "color": "green", "stability": "stable"}, "$.color"),
         ({"lines": [], "color": "red", "stability": "solid"}, "$.stability"),
         ({"lines": [], "color": "red", "stability": "stable", "tags": {"a.b": True}}, "$.tags['a.b']"),
+        # 按文本顺序：写在前面的类型不符先于缺少的成员，嵌套对象里缺少的成员先于外层后面的类型不符
+        ({"tags": {"a": "x"}}, "$.tags.a"),
+        ({"lines": [{"sku": "s1"}], "color": 1}, "$.lines[0]"),
+        # 只有 X | None、Maybe 与 JsonValue 接受 null
+        ({"lines": None, "color": "red", "stability": "stable"}, "$.lines"),
+        ({"lines": [], "color": "red", "stability": "stable", "tags": None}, "$.tags"),
     ]
     for value, path in cases:
         with pytest.raises(DecodeError) as raised:
             decode(Order, value)
         assert raised.value.path == path, value
+    # null 也算出现：可选的 note 写 null 就是没有值，必填的成员写 null 仍要过它自己的类型
+    assert decode(Order, {"lines": [], "color": "red", "stability": "stable", "note": None}) == Order(
+        lines=(), color=Color.RED, stability=Stability.STABLE
+    )
 
 
 def test_scalars_are_strict() -> None:
     assert decode(int, 3) == 3
+    assert decode(int, -(2**63)) == -(2**63)
     assert decode(float, 3) == 3.0
-    for target, value in [(int, True), (int, 1.5), (float, False), (str, 1), (bool, 0), (type(None), 0)]:
+    for target, value in [
+        (int, True),
+        (int, 1.5),
+        (int, 2**63),
+        (float, False),
+        (str, 1),
+        (str, None),
+        (bool, 0),
+        (type(None), 0),
+    ]:
         with pytest.raises(DecodeError):
             decode(target, value)
     assert decode(int | None, None) is None
