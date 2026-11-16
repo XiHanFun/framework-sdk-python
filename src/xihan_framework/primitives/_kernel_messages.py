@@ -22,7 +22,9 @@ BUILT_IN_CATALOG: Final = Catalog(
             "kernel.invocation.unhandled_exception": "An unhandled exception occurred during the invocation.",
             "kernel.operation.unknown": "Operation '{id}' is not registered.",
             "kernel.operation.invalid_payload": "The payload of operation '{id}' is not valid: {reason}",
-            "kernel.operation.type_mismatch": "Operation '{id}' handles '{expected}', but '{actual}' was supplied.",
+            "kernel.operation.type_mismatch": (
+                "Operation '{id}' was invoked with request or response types that do not match its registration."
+            ),
             "kernel.operation.no_response": "Operation '{id}' completed without producing a response.",
             "kernel.operation.duplicate": "Operation '{id}' is already registered by '{owner}'.",
             "kernel.operation.registry_full": "The operation registry has reached its capacity of {capacity}.",

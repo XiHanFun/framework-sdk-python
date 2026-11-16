@@ -39,7 +39,7 @@ ERROR_CODE_UNEXPECTED: Final = "KERNEL_UNEXPECTED_001"
 MESSAGE_NOT_FOUND: Final = "kernel.operation.unknown"
 #: 载荷不合法的消息键（参数 ``id``、``reason``）；与 .NET 宿主的目录同键。
 MESSAGE_INVALID_PAYLOAD: Final = "kernel.operation.invalid_payload"
-#: 类型不符的消息键（参数 ``id``、``expected``、``actual``）。
+#: 类型不符的消息键（参数只有 ``id``，ADR-0236）。
 MESSAGE_TYPE_MISMATCH: Final = "kernel.operation.type_mismatch"
 #: 管道成功结束却没有执行操作的消息键（参数 ``id``）。
 MESSAGE_NO_RESPONSE: Final = "kernel.operation.no_response"
@@ -363,24 +363,14 @@ class Invoker:
     ) -> Result[Res]:
         """类型化入口：不经 JSON，直接以请求对象经完整管道执行。
 
-        请求不是登记的请求类型的实例、或 ``response_type`` 不是登记的响应类型时返回 ``KERNEL_VALIDATION_002``；管道
-        成功结束却没有执行操作（中间件短路成功）时返回 ``KERNEL_UNEXPECTED_001``。
+        请求不是登记的请求类型的实例、或 ``response_type`` 不是登记的响应类型时返回 ``KERNEL_VALIDATION_002``（参数只有
+        ``id``）；管道成功结束却没有执行操作（中间件短路成功）时返回 ``KERNEL_UNEXPECTED_001``。
         """
         descriptor = self._registry.find(id)
         if descriptor is None:
             return fail(_not_found(id))
         if not _is_instance(request, descriptor.request_type) or response_type != descriptor.response_type:
-            return fail(
-                Error.validation(
-                    ERROR_CODE_TYPE_MISMATCH,
-                    MESSAGE_TYPE_MISMATCH,
-                    {
-                        "id": id,
-                        "expected": f"{_type_name(descriptor.request_type)} -> {_type_name(descriptor.response_type)}",
-                        "actual": f"{type(request).__name__} -> {_type_name(response_type)}",
-                    },
-                )
-            )
+            return fail(Error.validation(ERROR_CODE_TYPE_MISMATCH, MESSAGE_TYPE_MISMATCH, {"id": id}))
         handler = cast(Handler[Req, Res], descriptor._handler)
         results: list[Result[Res]] = []
 
@@ -446,8 +436,3 @@ def _is_instance(value: object, expected: type[Any]) -> bool:
     """按登记的类型判断实例；参数化的泛型（``list[int]``）按它的原始类型判断。"""
     origin = getattr(expected, "__origin__", expected)
     return isinstance(origin, type) and isinstance(value, origin)
-
-
-def _type_name(value: type[Any]) -> str:
-    """类型名，用于错误细节。"""
-    return getattr(value, "__name__", repr(value))

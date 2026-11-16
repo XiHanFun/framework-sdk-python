@@ -121,11 +121,11 @@ def test_typed_invoke_checks_types() -> None:
     mismatch = asyncio.run(invoker.invoke_typed(Context(), "orders.create", CreateOrder(quantity=3), str))
     assert mismatch.error is not None
     assert mismatch.error.code == operation.ERROR_CODE_TYPE_MISMATCH
-    assert mismatch.error.details == {
-        "id": "orders.create",
-        "expected": "CreateOrder -> OrderCreated",
-        "actual": "CreateOrder -> str",
-    }
+    # 只带 id：类型名是实现语言的，各语言写不出同样的参数（ADR-0236）
+    assert mismatch.error.details == {"id": "orders.create"}
+    assert mismatch.error.message == (
+        "Operation 'orders.create' was invoked with request or response types that do not match its registration."
+    )
     wrong_request = asyncio.run(invoker.invoke_typed(Context(), "orders.create", Empty(), OrderCreated))
     assert wrong_request.error is not None
     assert wrong_request.error.code == operation.ERROR_CODE_TYPE_MISMATCH
