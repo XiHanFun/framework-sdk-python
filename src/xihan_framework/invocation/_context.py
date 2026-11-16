@@ -5,7 +5,7 @@ import contextlib
 import re
 import secrets
 import threading
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import Any, Final, NamedTuple, Self, cast
@@ -107,9 +107,9 @@ def _ignore() -> None:
 class Cancellation:
     """一次调用的取消信号：只触发一次，可以从任何线程触发。
 
-    持有它的一方（协议宿主、插件运行时）调用 ``cancel``；上下文与它派生的上下文共享同一个信号。``Context.run``
-    订阅它来取消正在执行的协程，处理器也可以 ``await wait()`` 或读 ``is_cancelled`` 自己配合。订阅在退订或触发后
-    即移除，所以回调表的大小不超过同时在等的订阅数。
+    持有它的一方（协议宿主、插件运行时）调用 ``cancel``；上下文与它派生的上下文共享同一个信号。取消只经信号通知，
+    谁也不去取消处理器的任务（RFC-0003 规则 1）：处理器读 ``is_cancelled``、``await wait()`` 或调用
+    ``raise_if_cancelled()`` 自己配合。订阅在退订或触发后即移除，所以回调表的大小不超过同时在等的订阅数。
     """
 
     __slots__ = ("_callbacks", "_cancelled", "_lock", "_next_token")
@@ -125,6 +125,11 @@ class Cancellation:
     def is_cancelled(self) -> bool:
         """是否已触发。"""
         return self._cancelled
+
+    def raise_if_cancelled(self) -> None:
+        """已触发时抛出 ``asyncio.CancelledError``；``Context.run`` 按触发的信号把它归因为超时或取消。"""
+        if self._cancelled:
+            raise asyncio.CancelledError
 
     def cancel(self) -> None:
         """触发信号；重复调用什么都不做。回调在调用方线程里依次执行，任一抛出时其余照常执行，最后一并抛出。"""
@@ -220,29 +225,12 @@ class _Items:
             return self._values.get(key)
 
 
-class _RunState:
-    """``Context.run`` 一次执行的状态，只在事件循环线程里读写。"""
-
-    __slots__ = ("finished", "signalled", "withdrawn")
-
-    def __init__(self) -> None:
-        self.finished = False
-        self.signalled = False
-        self.withdrawn = False
-
-    def withdraw(self, task: "asyncio.Task[Any]") -> int:
-        """撤回本信号发出的取消请求（至多一次），返回任务剩下的取消请求数。"""
-        if not self.signalled or self.withdrawn:
-            return task.cancelling()
-        self.withdrawn = True
-        return task.uncancel()
-
-
 class Context:
     """一次调用的上下文（RFC-0003）：不可变，``with_*`` 方法派生新的上下文。
 
     派生的上下文共享取消信号、截止时间、追踪与对象袋，Baggage 按值复制。截止时间是 UTC 的绝对时刻；``run`` 在
-    截止时间与取消信号下执行协程，把超时与取消翻译成 ``KERNEL_TIMEOUT_001`` / ``KERNEL_CANCELLED_001``。
+    截止时间与取消信号下执行一次调用，取消与截止时间只经信号通知，超时与取消翻译成 ``KERNEL_TIMEOUT_001`` /
+    ``KERNEL_CANCELLED_001``。
     """
 
     __slots__ = ("_baggage", "_cancellation", "_deadline", "_items", "_sampled", "_span_id", "_trace_id")
@@ -419,67 +407,52 @@ class Context:
             return cancelled_error()
         return None
 
-    async def run[T](self, call: Coroutine[Any, Any, Result[T]]) -> Result[T]:
-        """在截止时间与取消信号下执行协程，超时与取消翻译成失败结果；调用器的 Resilience 阶段内置步骤就是它。
+    def with_cancellation(self, cancellation: Cancellation) -> Self:
+        """派生一个换了取消信号的上下文；截止时间、追踪、Baggage 与对象袋不变。"""
+        return self._derive(dict(self._baggage), cancellation)
 
-        进入时截止时间已过即返回 ``KERNEL_TIMEOUT_001`` + ``kernel.invocation.deadline_before_start``，不执行（关闭协程）；
-        进入时不核对取消，已触发的信号在协程第一次让出时取消它（RFC-0011 规则 10，ADR-0236，与 .NET 的
-        ``DeadlineMiddleware`` 一致）。截止时间的定时器触发时取消协程并返回 ``KERNEL_TIMEOUT_001``；信号触发时取消协程并
-        返回 ``KERNEL_CANCELLED_001``；两者都触发时报超时。协程自己接住取消、写下 ``KERNEL_CANCELLED_001`` 结果而定时器
-        已触发时，改写为超时（RFC-0004「行为变化」）；它写下的其他结果原样返回。任务被别处取消（不是这个信号）时
-        ``CancelledError`` 照常向外传播，不翻译成结果。
+    async def run[T](self, call: Callable[["Context"], Awaitable[Result[T]]]) -> Result[T]:
+        """在截止时间与取消信号下执行 ``call``，超时与取消翻译成失败结果；调用器的 Resilience 阶段内置步骤就是它。
+
+        进入时截止时间已过即返回 ``KERNEL_TIMEOUT_001`` + ``kernel.invocation.deadline_before_start``，``call`` 不执行；
+        进入时不核对取消（RFC-0011 规则 10，ADR-0236，与 .NET 的 ``DeadlineMiddleware`` 一致）。
+
+        ``call`` 收到一个派生的上下文，它的取消信号在调用方的信号触发或到达截止时间时触发。取消与截止时间只经这个信号
+        通知（RFC-0003 规则 1，ADR-0236）：不取消 ``call`` 所在的任务，``call`` 自己看信号（``is_cancelled``、
+        ``cancellation.wait()``、``cancellation.raise_if_cancelled()``）决定何时停下。信号触发之后 ``call`` 照常返回结果的，
+        以那个结果结束；``call`` 抛出 ``CancelledError`` 或写下 ``KERNEL_CANCELLED_001`` 结果时按触发的信号归因，截止时间
+        已到即 ``KERNEL_TIMEOUT_001``（调用方同时取消也一样），否则 ``KERNEL_CANCELLED_001``。任务本身被别处取消时
+        ``CancelledError`` 照常向外传播。
         """
         if self.is_expired():
-            call.close()
             return fail(deadline_before_start_error())
-        try:
-            task = asyncio.current_task()
-        except RuntimeError:
-            task = None
-        if task is None:
-            call.close()
-            raise RuntimeError("Context.run must be awaited inside an asyncio task.")
-        loop = asyncio.get_running_loop()
-        state = _RunState()
+        linked = Cancellation()
+        expired: list[bool] = []
 
-        def cancel_task() -> None:
-            # 只在事件循环线程里执行；协程已经结束或已经取消过就不再取消，免得取消请求计数失衡
-            if not state.finished and not state.signalled:
-                state.signalled = True
-                task.cancel()
+        def on_deadline() -> None:
+            expired.append(True)
+            linked.cancel()
 
-        def on_signal() -> None:
-            # 信号可能在别的线程触发：经事件循环回到任务所在的线程；循环已关闭说明这次执行已经结束
-            with contextlib.suppress(RuntimeError):
-                loop.call_soon_threadsafe(cancel_task)
-
-        unsubscribe = self._cancellation.on_cancel(on_signal)
+        # 调用方的信号可能已经触发：on_cancel 立即执行回调，下游一进来就看到已取消
+        unsubscribe = self._cancellation.on_cancel(linked.cancel)
         remaining = self.remaining_time()
-        timeout = asyncio.timeout(None if remaining is None else remaining.total_seconds())
+        timer = (
+            None if remaining is None else asyncio.get_running_loop().call_later(remaining.total_seconds(), on_deadline)
+        )
         try:
-            async with timeout:
-                try:
-                    result = await call
-                finally:
-                    state.finished = True
+            result = await call(self.with_cancellation(linked))
         except asyncio.CancelledError:
-            if not state.signalled:
+            task = asyncio.current_task()
+            if (task is not None and task.cancelling() > 0) or not linked.is_cancelled:
                 raise
-            # 撤回本信号发出的取消请求；还有别的请求说明任务也被别处取消了，照常传播
-            if state.withdraw(task) > 0:
-                raise
-            # 定时器与信号都触发时 asyncio.timeout 不把取消转成 TimeoutError，这里按定时器归因为超时
-            return fail(deadline_exceeded_error() if timeout.expired() else cancelled_error())
-        except TimeoutError:
-            if not timeout.expired():
-                raise
-            return fail(deadline_exceeded_error())
+            return fail(deadline_exceeded_error() if expired else cancelled_error())
         finally:
             unsubscribe()
-            # 协程接住了本信号的取消后正常返回，或把它转成了别的异常：同样撤回取消请求，计数保持平衡
-            state.withdraw(task)
+            if timer is not None:
+                timer.cancel()
         outcome = result.error
-        if timeout.expired() and outcome is not None and outcome.code == ERROR_CODE_CANCELLED:
+        if expired and outcome is not None and outcome.code == ERROR_CODE_CANCELLED:
+            # 下游把取消写成了结果：截止时间已到即按超时报告（RFC-0004「行为变化」）
             return fail(deadline_exceeded_error())
         return result
 
@@ -489,10 +462,10 @@ class Context:
             f"Context(trace_parent={self.trace_parent!r}, deadline={self._deadline!r}, baggage={dict(self._baggage)!r})"
         )
 
-    def _derive(self, baggage: dict[str, str]) -> Self:
-        """派生：换 Baggage，其余共享。"""
+    def _derive(self, baggage: dict[str, str], cancellation: Cancellation | None = None) -> Self:
+        """派生：换 Baggage（与取消信号），其余共享。"""
         derived = object.__new__(type(self))
-        derived._cancellation = self._cancellation
+        derived._cancellation = self._cancellation if cancellation is None else cancellation
         derived._deadline = self._deadline
         derived._trace_id = self._trace_id
         derived._span_id = self._span_id

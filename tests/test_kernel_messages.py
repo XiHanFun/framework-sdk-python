@@ -87,7 +87,7 @@ def produced_errors() -> list[Error]:
     cached = Invoker(registry, Builder().use_at(pipeline.func("Cache", short_circuit), PipelineStage.IDEMPOTENCY))
 
     async def collect() -> list[Error | None]:
-        expired = await Context(timeout=-1).run(ping(Context(), Ping()))
+        expired = await Context(timeout=-1).run(lambda ctx: ping(ctx, Ping()))
         return [
             expired.error,
             (await invoker.invoke(Context(), Request("pings.missing"))).outcome.error,

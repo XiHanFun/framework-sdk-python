@@ -370,8 +370,8 @@ class Invoker:
       ``kernel.invocation.unhandled_exception``（规则 5）；排在它之前的（Ingress 阶段，或 Observe 阶段 ``Beginning``
       上归属排在 ``xihan.kernel.core`` 之前的）抛出的异常原样交给调用方。
     - Resilience 阶段的 ``DeadlineMiddleware``：进入时截止时间已过即 ``KERNEL_TIMEOUT_001`` +
-      ``kernel.invocation.deadline_before_start``，不核对取消；之后的中间件与处理器在 ``Context.run`` 里执行，途中的
-      超时与取消按 RFC-0003 第 1 条归因。
+      ``kernel.invocation.deadline_before_start``，不核对取消；之后的中间件与处理器在 ``Context.run`` 里执行，拿到的
+      上下文在调用方取消或到达截止时间时触发信号。取消与截止时间只经信号通知，不中止处理器（RFC-0003 规则 1）。
     - Validate 阶段的 ``ValidationMiddleware``：原始调用在这里解码载荷，失败即 ``KERNEL_VALIDATION_001``；类型化调用跳过。
 
     进入管道之前只核对未登记（``KERNEL_NOTFOUND_001``）与类型化调用的类型不符（``KERNEL_VALIDATION_002``），按这个顺序。
@@ -499,8 +499,8 @@ async def _observe(ctx: Context, next_step: Step) -> Result[Unit]:
 
 
 async def _deadline(ctx: Context, next_step: Step) -> Result[Unit]:
-    """Resilience 阶段的内置步骤：进入时核对截止时间，之后在截止时间与取消信号下执行下游。"""
-    return await ctx.run(next_step(ctx))
+    """Resilience 阶段的内置步骤：进入时核对截止时间，之后在截止时间与取消信号下执行下游（``Context.run``）。"""
+    return await ctx.run(next_step)
 
 
 async def _validate(ctx: Context, next_step: Step) -> Result[Unit]:

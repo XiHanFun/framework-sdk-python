@@ -71,6 +71,15 @@ def invoke(invoker: Invoker, request: Request, ctx: Context | None = None) -> Re
     return asyncio.run(invoker.invoke(Context() if ctx is None else ctx, request))
 
 
+def invoke_with_timeout(invoker: Invoker, request: Request, seconds: float) -> Response:
+    """在事件循环里才创建带截止时间的上下文：建事件循环本身可能就超过很短的截止时间。"""
+
+    async def main() -> Response:
+        return await invoker.invoke(Context(timeout=seconds), request)
+
+    return asyncio.run(main())
+
+
 def error_of(response: Response) -> Error:
     assert response.outcome.error is not None, response
     return response.outcome.error
@@ -211,26 +220,50 @@ def test_concurrent_registrations_respect_uniqueness() -> None:
 
 
 def test_deadlines_and_cancellation_end_the_invocation() -> None:
+    # 取消与截止时间只经信号通知（RFC-0003 规则 1，ADR-0236）：处理器看信号停下，调用器不取消它的任务
     registry = Registry()
 
-    async def slow(ctx: Context, request: Empty) -> Result[Empty]:
-        await asyncio.sleep(5)
+    async def cooperative(ctx: Context, request: Empty) -> Result[Empty]:
+        await ctx.cancellation.wait()
+        ctx.cancellation.raise_if_cancelled()
         return ok(Empty())
 
-    registry.add(Contract("reports.export"), slow, request_type=Empty, response_type=Empty)
+    async def reports_cancelled(ctx: Context, request: Empty) -> Result[Empty]:
+        await ctx.cancellation.wait()
+        cancelled = ctx.cancellation_error()
+        assert cancelled is not None
+        return fail(cancelled)
+
+    async def ignores(ctx: Context, request: Empty) -> Result[Empty]:
+        await asyncio.sleep(0.05)
+        assert ctx.is_cancelled
+        return ok(Empty())
+
+    registry.add(Contract("reports.export"), cooperative, request_type=Empty, response_type=Empty)
+    registry.add(Contract("reports.check"), reports_cancelled, request_type=Empty, response_type=Empty)
+    registry.add(Contract("reports.ignore"), ignores, request_type=Empty, response_type=Empty)
     invoker = Invoker(registry)
-    timed_out = invoke(invoker, Request("reports.export"), Context(timeout=0.02))
-    assert error_of(timed_out).code == ERROR_CODE_DEADLINE_EXCEEDED
-    signal = Cancellation()
+    for id in ["reports.export", "reports.check"]:
+        timed_out = invoke_with_timeout(invoker, Request(id), 0.02)
+        assert error_of(timed_out).code == ERROR_CODE_DEADLINE_EXCEEDED, id
+        signal = Cancellation()
 
-    async def cancel_soon() -> Response:
-        asyncio.get_running_loop().call_later(0.02, signal.cancel)
-        return await invoker.invoke(Context(cancellation=signal), Request("reports.export"))
+        async def cancel_soon(source: Cancellation = signal, chosen: str = id) -> Response:
+            asyncio.get_running_loop().call_later(0.02, source.cancel)
+            return await invoker.invoke(Context(cancellation=source), Request(chosen))
 
-    assert error_of(asyncio.run(cancel_soon())).code == ERROR_CODE_CANCELLED
-    typed = asyncio.run(invoker.invoke_typed(Context(timeout=0.02), "reports.export", Empty(), Empty))
+        assert error_of(asyncio.run(cancel_soon())).code == ERROR_CODE_CANCELLED, id
+
+    async def typed_with_timeout() -> Result[Empty]:
+        return await invoker.invoke_typed(Context(timeout=0.02), "reports.export", Empty(), Empty)
+
+    typed = asyncio.run(typed_with_timeout())
     assert typed.error is not None
     assert typed.error.code == ERROR_CODE_DEADLINE_EXCEEDED
+    # 信号触发之后处理器照常返回结果的，调用以那个结果结束
+    finished = invoke_with_timeout(invoker, Request("reports.ignore"), 0.01)
+    assert finished.outcome.is_ok
+    assert finished.payload == b"{}"
 
 
 def test_typed_invocations_that_never_reach_the_handler_fail() -> None:
