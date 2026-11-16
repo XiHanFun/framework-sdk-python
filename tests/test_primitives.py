@@ -502,3 +502,25 @@ def test_describe_orders_arguments_by_utf16_code_units() -> None:
     # U+FF5E 的码点比 U+1F600 小，但 UTF-16 的码元 0xFF5E 比代理项 0xD83D 大：按码元排，表情在前
     assert primitives.describe("a.b", {"\uff5e": 1, "\U0001f600": 2}) == "a.b (\U0001f600=2, \uff5e=1)"
     assert primitives.describe("a.b", {"b": 1, "B": 2, "a": 3}) == "a.b (B=2, a=3, b=1)"
+
+
+def test_duplicate_members_are_rejected(vector: VectorLoader) -> None:
+    # JSON 值表达不了重复的成员名，向量给的是原文；同一层重复即不合法，不取第一个也不取最后一个（ADR-0235）
+    for case in vector("primitives", "wire-encoding")["duplicates"]:
+        with pytest.raises(FrameworkError) as raised:
+            _read_text(case["target"], case.get("kind"), case["text"])
+        assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT, case["name"]
+    assert _json.loads('{"a":1,"a":2}', reject_duplicates=False) == {"a": 2}
+    with pytest.raises(ValueError, match="more than once"):
+        _json.loads('{"a":[{"b":1,"b":2}]}')
+
+
+def _read_text(target: str, kind: str | None, text: str) -> object:
+    """按向量的 target 与 kind 从原文读取一条 Error 或 Result。"""
+    if target == "error":
+        return Error.from_json(text)
+    if kind == "unit":
+        return Result.unit_from_json(text)
+    if kind == "maybe":
+        return Result.maybe_from_json(text, _identity)
+    return Result.from_json(text, _identity)

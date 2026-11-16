@@ -308,3 +308,11 @@ def test_contributed_operations_follow_the_operation_id_grammar() -> None:
         "orders.create\n",
     ]:
         assert_rejected(manifest_json(contributes={"operations": [operation_id]}))
+
+
+def test_duplicate_members_make_a_manifest_invalid() -> None:
+    error = assert_rejected(
+        '{"id":"xihan.a.b","version":"1.0.0","primitives":"1","stability":"stable","kind":"capability","kind":"provider"}'
+    )
+    assert isinstance(error.__cause__, ValueError)
+    assert "more than once" in str(error.__cause__)

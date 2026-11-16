@@ -21,11 +21,16 @@ _HTML_PATTERN = re.compile("[<>&\u2028\u2029]")
 _SURROGATE_PATTERN = re.compile("[\ud800-\udfff]")
 
 
-def loads(text: str | bytes) -> JsonValue:
-    """解析 JSON 文本；字节按 UTF-8 解码，非标准常量与 BOM 都是 ``ValueError``。"""
+def loads(text: str | bytes, *, reject_duplicates: bool = True) -> JsonValue:
+    """解析 JSON 文本；字节按 UTF-8 解码，非标准常量与 BOM 都是 ``ValueError``。
+
+    ``reject_duplicates`` 为真时同一层出现重复的成员名也是 ``ValueError``（RFC-0001「Result」、RFC-0002 解析规则 2，
+    ADR-0235），不取第一个也不取最后一个；为假时后出现的覆盖先出现的，与 Python 与 System.Text.Json 的缺省一致。
+    """
     if isinstance(text, bytes):
         text = text.decode("utf-8")
-    value: JsonValue = json.loads(text, parse_constant=_reject_constant)
+    hook = _unique_members if reject_duplicates else None
+    value: JsonValue = json.loads(text, parse_constant=_reject_constant, object_pairs_hook=hook)
     return value
 
 
@@ -150,6 +155,16 @@ def _newline(parts: list[str], depth: int | None, extra: int) -> None:
     """缩进形式下换行并缩进到 ``depth + extra`` 层。"""
     if depth is not None:
         parts.append("\n" + "  " * (depth + extra))
+
+
+def _unique_members(members: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
+    """组装一个 JSON 对象，成员名重复即 ``ValueError``。"""
+    result: dict[str, JsonValue] = {}
+    for name, value in members:
+        if name in result:
+            raise ValueError(f"The JSON object has the member '{name}' more than once.")
+        result[name] = value
+    return result
 
 
 def _reject_constant(name: str) -> JsonValue:

@@ -212,7 +212,8 @@ class Descriptor:
         if text == b"null":
             return None, self._invalid_payload("the payload is null")
         try:
-            value: JsonValue = loads(text)
+            # 载荷里的重复成员规范没有规定：照 System.Text.Json 的缺省，后出现的覆盖先出现的
+            value: JsonValue = loads(text, reject_duplicates=False)
         except ValueError:
             return None, self._invalid_payload("$")
         try:
