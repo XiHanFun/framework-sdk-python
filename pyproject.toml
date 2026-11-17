@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "xihan-framework"
 dynamic = ["version"]
-description = "XiHan Framework SDK for Python: primitives, manifest, invocation context, pipeline and operations."
+description = "XiHan Framework SDK for Python: primitives, manifest, invocation context, pipeline, operations and the out-of-process plugin runtime."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -25,6 +25,11 @@ classifiers = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+# 进程外插件运行时 xihan_framework.plugin：gRPC 与 protobuf 只给它用，核心五块仍然零依赖。
+# 生成的协议代码要求 protobuf 的大版本与生成它的 protoc 相同（7），grpcio 不低于生成它的 grpcio-tools
+plugin = ["grpcio>=1.85.1", "protobuf>=7.36.2,<8"]
+
 [project.urls]
 Homepage = "https://framework.xihanfun.com"
 Documentation = "https://framework.docs.xihanfun.com"
@@ -33,7 +38,16 @@ Specification = "https://github.com/XiHanFun/framework-spec"
 Issues = "https://github.com/XiHanFun/framework-sdk-python/issues"
 
 [dependency-groups]
-dev = ["pytest>=9.0", "ruff==0.17.5", "mypy>=2.4"]
+# grpcio-tools 与 mypy-protobuf 决定提交的生成代码，与 ruff 一样锁定版本；类型存根供 mypy 检查插件运行时
+dev = [
+  "pytest>=9.0",
+  "ruff==0.17.5",
+  "mypy>=2.4",
+  "grpcio-tools==1.85.1",
+  "mypy-protobuf==5.1.0",
+  "types-grpcio>=1.85.0.20261028",
+  "types-protobuf>=7.35.1.20260906",
+]
 
 [tool.hatch.version]
 path = "src/xihan_framework/__init__.py"
@@ -50,8 +64,9 @@ exclude = ["/spec", "/tests"]
 [tool.ruff]
 line-length = 120
 target-version = "py312"
-src = ["src", "tests"]
-extend-exclude = ["spec"]
+src = ["src", "tests", "examples", "scripts"]
+# 协议代码与类型存根由 scripts/generate_protocol.py 生成，按生成的原样提交，不格式化也不检查
+extend-exclude = ["spec", "src/xihan_framework/plugin/v1/plugin_pb2*"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "N", "B", "UP", "C4", "SIM", "PIE", "RET", "PT", "ASYNC", "RUF"]
@@ -62,7 +77,8 @@ ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 [tool.mypy]
 strict = true
 python_version = "3.12"
-files = ["src", "tests"]
+# 生成的 plugin_pb2*.py 有同名的 .pyi，mypy 按存根检查，不看生成的实现
+files = ["src", "tests", "examples", "scripts"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,6 +1,7 @@
 name: CI
 
-# Python SDK 的门禁：格式与静态检查、strict 类型检查、全部测试（读取 spec/ 子模块里的一致性向量），以及分发包的内容。
+# Python SDK 的门禁：生成的协议代码与 .proto 一致、格式与静态检查、strict 类型检查、全部测试（读取 spec/ 子模块里的
+# 一致性向量，并用规范仓库的黑盒运行器跑示例插件 echo），以及分发包的内容。
 on:
   push:
     branches: [main]
@@ -35,11 +36,26 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: 安装包与开发依赖
+      - name: 安装 Go（黑盒运行器）
+        # 版本取规范子模块里运行器的 go.mod，与锁定的规范一致
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: spec/conformance/go.mod
+          cache-dependency-path: spec/conformance/go.sum
+
+      - name: 安装包（含插件运行时的可选依赖）与开发依赖
         # --group 需要 pip 25.1 以上
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e . --group dev
+          python -m pip install -e ".[plugin]" --group dev
+
+      - name: 生成的协议代码与 .proto 一致
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python scripts/generate_protocol.py
+          git diff --exit-code -- src/xihan_framework/plugin/v1
+          test -z "$(git status --porcelain -- src/xihan_framework/plugin/v1)"
 
       - name: 格式与静态检查
         run: |
@@ -50,6 +66,9 @@ jobs:
         run: mypy
 
       - name: 测试
+        # 一致性测试没有 Go 时本该跳过；CI 里装了 Go，跳过即失败
+        env:
+          XIHAN_CONFORMANCE_REQUIRED: "1"
         run: pytest
 
   package:
@@ -71,10 +90,12 @@ jobs:
           python -m pip install --upgrade pip build
           python -m build
 
-      - name: spec/ 与 tests/ 不进分发包，py.typed 在 wheel 里
+      - name: spec/、tests/ 与 examples/ 不进分发包，py.typed、协议代码的类型存根与消息目录在 wheel 里
         # 用 if 判定而不是 ! 取反：bash 的 errexit 不因取反的命令失败而退出
         shell: bash
         run: |
-          if tar -tzf dist/*.tar.gz | grep -E '/(spec|tests)/'; then echo "spec/ or tests/ leaked into the sdist"; exit 1; fi
-          if python -m zipfile -l dist/*.whl | grep -E '(^| )(spec|tests)/'; then echo "spec/ or tests/ leaked into the wheel"; exit 1; fi
+          if tar -tzf dist/*.tar.gz | grep -E '/(spec|tests|examples)/'; then echo "spec/, tests/ or examples/ leaked into the sdist"; exit 1; fi
+          if python -m zipfile -l dist/*.whl | grep -E '(^| )(spec|tests|examples)/'; then echo "spec/, tests/ or examples/ leaked into the wheel"; exit 1; fi
           python -m zipfile -l dist/*.whl | grep -q 'xihan_framework/py.typed'
+          python -m zipfile -l dist/*.whl | grep -q 'xihan_framework/plugin/v1/plugin_pb2_grpc.pyi'
+          python -m zipfile -l dist/*.whl | grep -q 'xihan_framework/plugin/Localization/zh-CN.json'
