@@ -255,6 +255,40 @@ def test_deadline_wins_when_both_fire() -> None:
         assert error.code == ERROR_CODE_DEADLINE_EXCEEDED
 
 
+def test_deadline_signal_never_fires_before_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    # asyncio 把时钟精度之内到期的定时器当作已到期，Windows 上的 Python 3.12 可能早约 15 ms 触发；
+    # 这里让第一个定时器立即触发来模拟，截止信号仍要等到按时钟已过截止时间才触发
+    seen_expired: list[bool] = []
+
+    async def wait_for_signal(scoped: Context) -> Result[Unit]:
+        await scoped.cancellation.wait()
+        seen_expired.append(scoped.is_expired())
+        return fail(cancelled_error())
+
+    async def scenario() -> tuple[Context, Result[Unit]]:
+        loop = asyncio.get_running_loop()
+        original = loop.call_later
+        early = [True]
+
+        def call_later(delay: float, callback: Callable[..., object], *args: Any, **kwargs: Any) -> asyncio.TimerHandle:
+            if early[0]:
+                early[0] = False
+                return original(0, callback, *args, **kwargs)
+            return original(delay, callback, *args, **kwargs)
+
+        monkeypatch.setattr(loop, "call_later", call_later)
+        ctx = Context(timeout=0.05)
+        return ctx, await ctx.run(wait_for_signal)
+
+    ctx, outcome = asyncio.run(scenario())
+    assert seen_expired == [True]
+    assert outcome.error is not None
+    assert outcome.error.code == ERROR_CODE_DEADLINE_EXCEEDED
+    error = ctx.cancellation_error()
+    assert error is not None
+    assert error.code == ERROR_CODE_DEADLINE_EXCEEDED
+
+
 def test_downstream_results_are_kept_unless_the_deadline_fired() -> None:
     async def report_cancelled(ctx: Context) -> Result[Unit]:
         return fail(cancelled_error())

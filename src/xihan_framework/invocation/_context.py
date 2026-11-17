@@ -428,17 +428,24 @@ class Context:
             return fail(deadline_before_start_error())
         linked = Cancellation()
         expired: list[bool] = []
+        loop = asyncio.get_running_loop()
+        timer: list[asyncio.TimerHandle] = []
 
         def on_deadline() -> None:
+            # asyncio 把时钟精度之内到期的定时器当作已到期，Windows 上的 Python 3.12 可能早约 15 ms 触发；
+            # 按时钟还没到截止时间就再等剩下的时间，信号不早于截止时间，与 is_expired、cancellation_error 一致
+            if not self.is_expired():
+                remaining = self.remaining_time() or timedelta(0)
+                timer[0] = loop.call_later(remaining.total_seconds(), on_deadline)
+                return
             expired.append(True)
             linked.cancel()
 
         # 调用方的信号可能已经触发：on_cancel 立即执行回调，下游一进来就看到已取消
         unsubscribe = self._cancellation.on_cancel(linked.cancel)
         remaining = self.remaining_time()
-        timer = (
-            None if remaining is None else asyncio.get_running_loop().call_later(remaining.total_seconds(), on_deadline)
-        )
+        if remaining is not None:
+            timer.append(loop.call_later(remaining.total_seconds(), on_deadline))
         try:
             result = await call(self.with_cancellation(linked))
         except asyncio.CancelledError:
@@ -448,8 +455,8 @@ class Context:
             return fail(deadline_exceeded_error() if expired else cancelled_error())
         finally:
             unsubscribe()
-            if timer is not None:
-                timer.cancel()
+            if timer:
+                timer[0].cancel()
         outcome = result.error
         if expired and outcome is not None and outcome.code == ERROR_CODE_CANCELLED:
             # 下游把取消写成了结果：截止时间已到即按超时报告（RFC-0004「行为变化」）
