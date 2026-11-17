@@ -72,6 +72,9 @@ _STATUS_NAMES: Final = (
 )
 # 本地取消的调用没有宿主给的状态消息，reason 的说明写这句
 _LOCALLY_CANCELLED: Final = "the call was cancelled"
+# 映射表里单独用到的两个状态码
+_CANCELLED: Final[int] = grpc.StatusCode.CANCELLED.value[0]
+_DEADLINE_EXCEEDED: Final[int] = grpc.StatusCode.DEADLINE_EXCEEDED.value[0]
 
 # 运行时把宿主客户端放进每次调用与投递的上下文；只在本包里写入
 HOST_ITEM: Final = ItemKey["Host"]("xihan.plugin.host")
@@ -204,8 +207,8 @@ class Host:
     def _refuse(self, ctx: Context, rpc: str) -> Error | None:
         """发出之前的本地核对，不合时给出错误、不发请求；全部通过时为 ``None``。
 
-        先看有没有可用端点（handshake.md §4），再按宿主的顺序核对权限与上下文的租户（invocation.md §5）；最后截止时间已过
-        或已取消的调用不发出，结果与 gRPC 报 ``DeadlineExceeded`` / 调用方取消的 ``Cancelled`` 相同。
+        依次是（invocation.md §5）：① 有没有可用端点（handshake.md §4）；② 权限；③ 上下文的租户；④ 上下文的截止时间已过
+        或已被取消，结果与映射表相应的一行相同。
         """
         if self._stub is None:
             return Error.unavailable(
@@ -223,7 +226,17 @@ class Host:
             return Error.denied(
                 ERROR_CODE_CALLBACK_DENIED, MESSAGE_CALLBACK_TENANT_DENIED, {"id": self._plugin_id, "tenant": tenant}
             )
-        return ctx.cancellation_error()
+        # 第 ④ 步：截止时间已过或已被取消的调用也不发出，结果取映射表里相应的一行（截止时间已过按 DeadlineExceeded，
+        # 已被取消按「Cancelled，取消信号已触发」），与发出去之后 gRPC 报回来的相同；两者都成立时按截止时间
+        if ctx.is_expired():
+            return map_callback_status(
+                rpc, _DEADLINE_EXCEEDED, "", ctx.is_cancelled, self._plugin_id, callback_phase(rpc, "")
+            )
+        if ctx.is_cancelled:
+            return map_callback_status(
+                rpc, _CANCELLED, _LOCALLY_CANCELLED, True, self._plugin_id, callback_phase(rpc, "")
+            )
+        return None
 
     async def _call[Req, Res](
         self, ctx: Context, method: grpc.aio.UnaryUnaryMultiCallable[Req, Res], request: Req
@@ -255,13 +268,19 @@ class Host:
 
     def _cancelled(self, ctx: Context, rpc: str, operation: str) -> Error:
         """调用在本地被取消（``call.cancel``），按 ``Cancelled`` 映射：上下文的信号触发了即取消，否则是连接被切断。"""
-        return map_callback_status(rpc, 1, _LOCALLY_CANCELLED, ctx.is_cancelled, self._plugin_id, operation)
+        return map_callback_status(rpc, _CANCELLED, _LOCALLY_CANCELLED, ctx.is_cancelled, self._plugin_id, operation)
 
 
 def callback_permission(rpc: str) -> str:
     """回调 RPC 所需的权限（invocation.md §5）：``Host.Invoke`` 为 ``capability:kernel.pipeline``，``Host.Publish`` 为
     ``capability:messaging.queue``。"""
     return PERMISSION_INVOKE if rpc == CALLBACK_INVOKE else PERMISSION_PUBLISH
+
+
+def callback_phase(rpc: str, operation: str) -> str:
+    """回调失败时 ``plugins.process.failed`` 的 ``phase``（invocation.md §3、§5）：``Host.Invoke`` 是操作 ID，``Host.Publish``
+    是 ``publish``。"""
+    return PHASE_PUBLISH if rpc == CALLBACK_PUBLISH else operation
 
 
 def status_name(code: int) -> str:
@@ -308,8 +327,7 @@ def map_callback_status(
         return Error.validation(
             ERROR_CODE_INVALID_PAYLOAD, MESSAGE_INVALID_PAYLOAD, {"id": operation, "reason": message}
         )
-    phase = operation if rpc == CALLBACK_INVOKE else PHASE_PUBLISH
-    return failed(plugin_id, phase, status_reason(code, message))
+    return failed(plugin_id, callback_phase(rpc, operation), status_reason(code, message))
 
 
 def _being_cancelled() -> bool:

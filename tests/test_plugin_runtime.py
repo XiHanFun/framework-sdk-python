@@ -684,15 +684,23 @@ def test_health_while_serving_probes_the_hook_every_time(caplog: pytest.LogCaptu
             warnings = [record for record in caplog.records if "undeclared" in record.getMessage()]
             assert len(warnings) == 1
             assert warnings[0].levelno == logging.WARNING
-            # 回调抛出：这一次是 Degraded，没有健康项，状态不变
+            # 回调抛出：这一次是 Degraded，没有健康项，状态也迁到 Degraded；调用照常服务（Degraded 可服务）
             probe.health_error = KeyError("x")
             thrown = await plugin.health()
             assert thrown.state == pb.LIFECYCLE_STATE_DEGRADED
             assert list(thrown.items) == []
             assert details(pb.Status(error=thrown.error)) == {"id": PROBE_ID, "phase": "health", "reason": "KeyError"}
+            echoed = await plugin.stub.Invoke(invoke("probes.echo", b'{"text":"x"}'), metadata=session())
+            assert echoed.status.ok
+            # 之后的结果照常决定状态：不报状态的不改变状态，报 Ready 的回到 Ready
             probe.health_error = None
-            assert (await plugin.health()).state == pb.LIFECYCLE_STATE_READY
-            # 回调报的 Degraded 生效，原因跟着变；报其他状态不改变状态
+            kept = await plugin.health()
+            assert (kept.state, [item.name for item in kept.items]) == (pb.LIFECYCLE_STATE_DEGRADED, ["probe"])
+            probe.health_state = LifecycleState.READY
+            recovered = await plugin.health()
+            assert recovered.state == pb.LIFECYCLE_STATE_READY
+            assert not recovered.HasField("error")
+            # 回调报的 Degraded 生效；报其他状态不改变状态
             probe.health_state = LifecycleState.DEGRADED
             assert (await plugin.health()).state == pb.LIFECYCLE_STATE_DEGRADED
             probe.health_state = LifecycleState.DRAINING

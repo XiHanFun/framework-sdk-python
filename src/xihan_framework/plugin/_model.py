@@ -112,8 +112,9 @@ class Health:
     """健康回调报的健康（lifecycle.md §7.4）。
 
     ``state`` 只有 ``READY``、``DEGRADED``、``FAILED`` 生效：按原语层的迁移表从运行时的当前状态迁移过去（``FAILED`` 之后
-    不再回来），``None`` 与其他状态不改变状态；``error`` 是 ``DEGRADED`` / ``FAILED`` 的原因。``items`` 里名字不在清单
-    ``contributes.health`` 的健康项丢掉、不发给宿主。
+    不再回来），``None`` 与其他状态不改变状态（``Start`` 时按 ``READY``）；``error`` 是 ``DEGRADED`` / ``FAILED`` 的原因。
+    回调抛出与报了 ``DEGRADED`` 一样迁移，原因是 ``plugins.process.failed``。``items`` 里名字不在清单 ``contributes.health``
+    的健康项丢掉、不发给宿主。
     """
 
     state: LifecycleState | None = None

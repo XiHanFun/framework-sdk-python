@@ -64,7 +64,12 @@ from xihan_framework.plugin._convert import (
     to_proto_error,
     to_status,
 )
-from xihan_framework.plugin._host import REASON_NO_CALLBACK_ENDPOINT, map_callback_status, status_name
+from xihan_framework.plugin._host import (
+    REASON_NO_CALLBACK_ENDPOINT,
+    callback_phase,
+    map_callback_status,
+    status_name,
+)
 from xihan_framework.plugin._lifecycle import TenantLedger
 from xihan_framework.plugin._runtime import REASON_CONFIGURATION_NOT_OBJECT
 from xihan_framework.plugin.v1 import plugin_pb2 as pb
@@ -260,6 +265,65 @@ def test_errors_with_a_message_key_are_written_without_text() -> None:
     assert to_status(success()) == pb.Status(ok=True)
 
 
+def _decoded(error: Error | None) -> Any:
+    """读入后的错误，写成向量 ``expected`` 的形状；数的类型也比较（``1e+20`` 读成双精度，不是整数）。"""
+    if error is None:
+        return None
+    details = None if error.details is None else {name: (type(value), value) for name, value in error.details.items()}
+    return {
+        "code": error.code,
+        "key": error.message_key,
+        "text": error.text,
+        "details": details,
+        "inner": _decoded(error.inner),
+    }
+
+
+def _expected(case: Any) -> Any:
+    if case is None:
+        return None
+    details = case["details"]
+    return {
+        "code": case["code"],
+        "key": case["key"],
+        "text": case["text"],
+        "details": None if details is None else {name: (type(value), value) for name, value in details.items()},
+        "inner": _expected(case["inner"]),
+    }
+
+
+def _proto_error(fields: dict[str, Any]) -> pb.Error:
+    inner = fields.get("inner")
+    encoded = pb.Error(
+        code=fields["code"], message_key=fields["message_key"], text=fields["text"], details=fields["details"]
+    )
+    if inner is not None:
+        encoded.inner.CopyFrom(_proto_error(inner))
+    return encoded
+
+
+def test_errors_written_by_the_host_follow_the_vector(vector: VectorLoader) -> None:
+    reading = vector("plugin", "error-reading")
+    plugin_id = reading["pluginId"]
+    for case in reading["cases"]:
+        decoded = from_proto_error(_proto_error(case["error"]), plugin_id)
+        assert _decoded(decoded) == _expected(case["expected"]), case["name"]
+        # Host.Invoke 与 Host.Publish 的结果同一规则：错误码不合文法的 phase 也是 invoke
+        for phase in ("orders.create", "publish"):
+            status = pb.Status(ok=False, error=_proto_error(case["error"]))
+            result = from_status(status, plugin_id=plugin_id, phase=phase)
+            assert _decoded(result.error) == _expected(case["expected"]), (case["name"], phase)
+    for case in reading["statusWithoutError"]:
+        if case["reader"] != "plugin":
+            continue
+        phase = callback_phase(case["rpc"], case["operation"] or "")
+        # ok 为假却没有 error 与整个 status 缺失相同
+        missing: tuple[pb.Status | None, ...] = (pb.Status(ok=False), None)
+        for absent in missing:
+            result = from_status(absent, plugin_id=plugin_id, phase=phase)
+            assert _decoded(result.error) == _expected(case["expected"]), case
+
+
 def test_errors_written_by_the_host_are_read_by_the_same_rules() -> None:
     replaced = from_proto_error(
         pb.Error(
@@ -404,14 +468,27 @@ def test_callbacks_are_checked_locally_before_anything_is_sent() -> None:
             assert reached is not None
             assert (reached.code, reached.message_key) == (ERROR_CODE_UNAVAILABLE, MESSAGE_HOST_UNAVAILABLE)
             assert str(reached.details["reason"]).startswith("Unavailable: ")  # type: ignore[index]
-        expired = await host.invoke(Context(timeout=-1), "orders.create")
-        assert expired.outcome.error is not None
-        assert expired.outcome.error.code == "KERNEL_TIMEOUT_001"
+        # 第 ④ 步排在租户之后：截止时间已过、租户也越界的回调报租户
+        expired_tenant = Context(timeout=-1, baggage={"xihan.tenant": "t1"})
+        assert (await host.invoke(expired_tenant, "orders.create")).outcome.error == refused
+        # 截止时间已过按 DeadlineExceeded、已被取消按「Cancelled，取消信号已触发」那一行，两者都成立时按截止时间；不发请求
+        timeout = Error.timeout("KERNEL_TIMEOUT_001", "kernel.invocation.deadline_exceeded")
+        cancelled_error = Error.cancelled("KERNEL_CANCELLED_001", "kernel.invocation.cancelled")
+        assert (await host.invoke(Context(timeout=-1), "orders.create")).outcome.error == timeout
         cancelled = Context()
         cancelled.cancellation.cancel()
-        assert (await host.invoke(cancelled, "orders.create")).outcome.error == Error.cancelled(
-            "KERNEL_CANCELLED_001", "kernel.invocation.cancelled"
+        assert (await host.invoke(cancelled, "orders.create")).outcome.error == cancelled_error
+        # 权限排在第 ④ 步之前：这个客户端的清单没有声明发布权限
+        assert [result.error for result in await host.publish(cancelled, envelopes)] == [denied(PERMISSION_PUBLISH)] * 2
+        publisher = Host(
+            Endpoint(Network.TCP, "127.0.0.1:9"), "token", PLUGIN_ID, ledger, permissions=[PERMISSION_PUBLISH]
         )
+        publisher._grant([PERMISSION_PUBLISH])
+        assert [result.error for result in await publisher.publish(cancelled, envelopes)] == [cancelled_error] * 2
+        await publisher.close()
+        both = Context(timeout=-1)
+        both.cancellation.cancel()
+        assert (await host.invoke(both, "orders.create")).outcome.error == timeout
         await host.close()
 
     run_scenario(scenario)

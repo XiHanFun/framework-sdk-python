@@ -391,9 +391,8 @@ class _Runtime:
         self._shutdown_deadline = 0.0
         # Stop 应答之后、或收尾开始：serve 往下走，WatchHealth 结束推送
         self._finished = asyncio.Event()
-        # 最近一次健康回调报的健康项（只留声明了的）与它抛出时的错误
+        # 最近一次健康回调报的健康项（只留声明了的）；回调抛出时为空
         self._items: tuple[HealthItem, ...] = ()
-        self._probe_error: Error | None = None
         self._undeclared_items: set[str] = set()
         self._check_environment(environ)
 
@@ -647,15 +646,12 @@ class _Runtime:
     def _become_ready(self) -> None:
         """``Started`` 之后按健康回调的结果进入 ``Ready``、``Degraded`` 或 ``Failed``（lifecycle.md §7.3）。
 
-        健康回调报了这三种状态之一时 ``_probe`` 已经迁移过去；它抛出时这次结果是 ``Degraded``；报别的状态与没有健康回调时
-        进入 ``Ready``。所以 ``Start`` 应答之后的状态是这三种之一。
+        健康回调报了这三种状态之一、或者抛出（按 ``Degraded``）时 ``_probe`` 已经迁移过去；报别的状态与没有健康回调时进入
+        ``Ready``。所以 ``Start`` 应答之后的状态是这三种之一。
         """
         self._probe()
         if self.lifecycle.state is LifecycleState.STARTED:
-            if self._probe_error is not None:
-                self.lifecycle.transition(LifecycleState.DEGRADED, self._probe_error)
-            else:
-                self.lifecycle.transition(LifecycleState.READY)
+            self.lifecycle.transition(LifecycleState.READY)
 
     def _settle(self, result: Result[Unit], success_state: LifecycleState, phase: str) -> bool:
         """按一步的结果迁移状态：成功到 ``success_state``，失败到 ``Failed`` 并记错误日志。"""
@@ -750,7 +746,8 @@ class _Runtime:
 
         报 ``Ready``、``Degraded`` 或 ``Failed`` 的按迁移表迁移（``Failed`` 之后不再回来），报其他状态的不改变状态；名字不在
         清单 ``contributes.health`` 里的健康项丢掉，同一个名字只记一条 ``warning``。抛出时这一次的结果是 ``Degraded``，
-        ``error`` 为 ``plugins.process.failed``（``phase`` 为 ``health``），没有健康项。
+        ``error`` 为 ``plugins.process.failed``（``phase`` 为 ``health``），没有健康项；状态与回调报了 ``Degraded`` 一样
+        迁过去，之后的结果照常决定状态。
         """
         hook = self.plugin.hooks.health
         if hook is None:
@@ -760,10 +757,9 @@ class _Runtime:
         except Exception as exception:
             _logger.error("The health hook raised an unhandled exception.", exc_info=True, extra={"plugin": self.id})
             self._items = ()
-            self._probe_error = failed(self.id, _PHASE_HEALTH, _reason(exception))
+            self._apply(LifecycleState.DEGRADED, failed(self.id, _PHASE_HEALTH, _reason(exception)))
             self.lifecycle.notify()
             return
-        self._probe_error = None
         declared = self.plugin.manifest.health
         items: list[HealthItem] = []
         for item in reported.items:
@@ -778,22 +774,23 @@ class _Runtime:
                     extra={"plugin": self.id},
                 )
         self._items = tuple(items)
-        state = reported.state
-        if state in HEALTH_REPORTED_STATES:
-            if state is self.lifecycle.state:
-                self.lifecycle.report(reported.error)
-            else:
-                self.lifecycle.transition(state, reported.error)
+        if reported.state in HEALTH_REPORTED_STATES:
+            self._apply(reported.state, reported.error)
         # 健康项可能变了：让 WatchHealth 比较一次
         self.lifecycle.notify()
 
+    def _apply(self, state: LifecycleState, error: Error | None) -> None:
+        """照健康的结果迁移状态：与当前状态相同时只换原因，否则按迁移表迁移（``Failed`` 之后不再回来）。"""
+        if state is self.lifecycle.state:
+            self.lifecycle.report(error)
+        else:
+            self.lifecycle.transition(state, error)
+
     def snapshot(self) -> pb.HealthResponse:
-        """当前的健康，不调健康回调：``Start`` 之前报本地状态、没有健康项；健康回调这一次抛出时报 ``Degraded``。"""
+        """当前的健康，不调健康回调：``Start`` 之前报本地状态、没有健康项，之后照实报状态、原因与最近的健康项。"""
         state, error = self.lifecycle.current()
         if not self._started:
             return to_proto_health(state, (), error)
-        if self._probe_error is not None and state in SERVING_STATES:
-            return to_proto_health(LifecycleState.DEGRADED, (), self._probe_error)
         return to_proto_health(state, self._items, error)
 
     def context(self, metadata: pb.InvocationMetadata | None, remaining: float | None) -> tuple[Context, Cancellation]:

@@ -1,6 +1,7 @@
 """协议消息与 SDK 类型之间的转换：错误与结果（invocation.md §3）、上下文元数据（invocation.md §2）、信封与健康。"""
 
 import calendar
+import math
 import re
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
@@ -234,11 +235,29 @@ def to_proto_health(state: LifecycleState, items: Iterable[HealthItem], error: E
 
 
 def _details(text: str) -> Mapping[str, JsonValue] | None:
-    """读错误细节的 JSON 对象文本：空、通不过共同的 JSON 读取检查或不是对象时为 ``None``。"""
+    """读错误细节的 JSON 对象文本（invocation.md §3）：空、只有空白、通不过共同的 JSON 读取检查、不是对象、是空对象，或
+    任何一层有读成双精度会溢出的数时为 ``None``，即没有细节。
+
+    数按值模型读：64 位范围内的整数是 ``int``，超出的是 ``float``，下溢读成 0。
+    """
     if not text:
         return None
     try:
+        # 只有空白的文本在共同读取检查里是语法错误
         value = parse(text)
     except JsonTextError:
         return None
-    return value if isinstance(value, dict) else None
+    if not isinstance(value, dict) or not value or _overflows(value):
+        return None
+    return value
+
+
+def _overflows(value: JsonValue) -> bool:
+    """任何一层有没有读成 ±∞ 的数：JSON 没有无穷大的写法，读出 ±∞ 只能是超出双精度的数。"""
+    if isinstance(value, float):
+        return math.isinf(value)
+    if isinstance(value, list):
+        return any(_overflows(item) for item in value)
+    if isinstance(value, dict):
+        return any(_overflows(member) for member in value.values())
+    return False
