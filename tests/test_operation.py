@@ -1,4 +1,4 @@
-"""operation 的测试：Go SDK 移植来的调用、类型化调用与登记表用例，以及容量、载荷错误、超时与取消。"""
+"""operation 的测试：调用、类型化调用与登记表，以及容量、载荷错误、超时与取消。"""
 
 import asyncio
 import json
@@ -188,7 +188,7 @@ def test_registry_capacity_is_ten_thousand() -> None:
     with pytest.raises(FrameworkError) as raised:
         registry.add(Contract("overflow.get"), handle, request_type=Empty, response_type=Empty)
     assert raised.value.code == operation.ERROR_CODE_REGISTRY_FULL
-    # 重复先于容量判定，与 Go 一致
+    # 登记表满了也先报重复：重复是这个 ID 自己的问题，与容量无关
     with pytest.raises(FrameworkError) as raised:
         registry.add(Contract("items0.get"), handle, request_type=Empty, response_type=Empty)
     assert raised.value.code == operation.ERROR_CODE_DUPLICATE
@@ -644,7 +644,7 @@ def test_the_deadline_is_checked_when_entering_resilience() -> None:
     mismatch = asyncio.run(invoker.invoke_typed(Context(timeout=-1), "orders.create", Empty(), OrderCreated))
     assert mismatch.error is not None
     assert mismatch.error.code == operation.ERROR_CODE_TYPE_MISMATCH
-    # 进入时不核对取消：信号已触发而处理器不让出时照常完成，与 .NET 处理器不看令牌时一样
+    # 进入时不核对取消：信号已触发而处理器不看信号时照常完成（RFC-0003 规则 1，RFC-0011 规则 10）
     signal = Cancellation()
     signal.cancel()
     assert invoke(invoker, Request("orders.create", b'{"quantity":1}'), Context(cancellation=signal)).outcome.is_ok

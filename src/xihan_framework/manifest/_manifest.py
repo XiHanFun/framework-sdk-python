@@ -221,7 +221,7 @@ class Manifest:
     """一份清单；字段顺序与写出的顺序一致。
 
     构造时校验各字段自己的格式，不合抛出 ``FrameworkError``（``PRIMITIVES_VALIDATION_001``）；字段之间的约束由
-    ``validate`` 核对，与 .NET 的 ``Manifest.Validate`` 相同。
+    ``validate`` 核对（RFC-0002 解析规则 2 第 4 步）。
     """
 
     id: str

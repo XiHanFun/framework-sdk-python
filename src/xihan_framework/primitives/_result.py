@@ -41,7 +41,7 @@ class Unit:
 
     @classmethod
     def from_json_value(cls, value: JsonValue) -> "Unit":
-        """从线上编码还原：任意 JSON 对象都是 ``UNIT``，与 Go 解码空结构一致。"""
+        """从线上编码还原：任意 JSON 对象都是 ``UNIT``，没有成员的类型按 RFC-0011 规则 2 忽略未知成员。"""
         if not isinstance(value, Mapping):
             raise ValueError("A unit on the wire must be a JSON object.")
         return UNIT

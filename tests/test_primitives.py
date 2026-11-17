@@ -1,4 +1,4 @@
-"""primitives 的测试：一致性向量（错误码、Baggage 键、生命周期迁移）与 Go SDK 移植来的编码、消息与工厂用例。"""
+"""primitives 的测试：一致性向量（错误码、Baggage 键、生命周期迁移）与编码、消息、工厂的用例。"""
 
 import math
 from collections.abc import Callable, Iterator
@@ -208,7 +208,7 @@ def test_error_messages_resolve_through_the_default_catalog() -> None:
 
 
 def test_templates_format_named_positional_and_escaped_placeholders() -> None:
-    # printf 风格的 %03d 不是可移植的说明符：按无格式输出，不再像 Go SDK 那样当成 fmt 动词（RFC-0010「模板」）
+    # printf 风格的 %03d 不是可移植的说明符，按无格式输出（RFC-0010「模板」，ADR-0236）
     assert primitives.format_message("{0} of {count:%03d}", {"0": "a", "count": 7}) == "a of 7"
     assert primitives.format_message("{missing}", None) == "{missing}"
     assert primitives.format_message("{{id}} is {id}", {"id": 1}) == "{id} is 1"
@@ -243,7 +243,7 @@ def test_arguments_follow_the_text_forms() -> None:
         (123456789.0, "123456789"),
         (999999999999999.9, "999999999999999.9"),
         (-0.0, "-0"),
-        # 1e-4 ≤ |x| < 1e17 不用指数（Python 的 repr 到 1e16 就换成指数），范围外写 .NET 的指数形式（ADR-0235）
+        # 1e-4 ≤ |x| < 1e17 不用指数（Python 的 repr 到 1e16 就换成指数），范围外写值模型的指数形式（ADR-0235）
         (1e15, "1000000000000000"),
         (1e16, "10000000000000000"),
         (1e17, "1E+17"),
@@ -304,7 +304,7 @@ def test_error_wire_encoding() -> None:
         Error.from_json('{"code":"bad"}')
     with pytest.raises(FrameworkError):
         Error.from_json("{")
-    # 细节的键按字典序写出，与 Go 编码 map 一致
+    # 细节的键按字典序写出，输出不随插入顺序变化
     sorted_details = Error("ORDERS_VALIDATION_001", "orders.invalid", {"z": 1, "a": {"y": 2, "b": 3}})
     assert '"details":{"a":{"b":3,"y":2},"z":1}' in sorted_details.to_json()
 
@@ -335,7 +335,7 @@ def test_result_wire_encoding() -> None:
 
 
 def test_results_cannot_be_uninitialized() -> None:
-    # Go 的零值 Result 是未初始化的失败；Python 只能经工厂创建，直接构造即编程错误
+    # RFC-0001 里默认值的 Result 是未初始化的失败（PRIMITIVES_VALIDATION_002）；Python 只能经工厂创建，直接构造即编程错误
     with pytest.raises(TypeError):
         Result(object(), 1, None)
     with pytest.raises(FrameworkError):

@@ -354,7 +354,7 @@ def test_cross_field_constraints_follow_the_validate_order() -> None:
 
 
 def test_plugins_of_any_isolation_may_declare_pipeline_contributions() -> None:
-    # 只有 Wasm 插件的中间件生效，由宿主在发现插件时核对（PLUGINS_VALIDATION_001）；读取与 .NET 一样不拒绝（ADR-0236）
+    # 只有 Wasm 插件的中间件生效，由宿主在发现插件时核对（PLUGINS_VALIDATION_001）；读取不拒绝（RFC-0002，ADR-0236）
     audit = [{"middleware": "audit", "stage": "observe"}, {"middleware": "tenant-guard", "stage": "tenant"}]
     for isolation in Isolation:
         parsed = read_ok(manifest_json(kind="plugin", isolation=isolation.value, contributes={"pipeline": audit}))

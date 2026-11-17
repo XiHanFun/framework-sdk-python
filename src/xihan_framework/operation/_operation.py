@@ -39,7 +39,7 @@ ERROR_CODE_UNEXPECTED: Final = "KERNEL_UNEXPECTED_001"
 
 #: 操作未登记的消息键（参数 ``id``）。
 MESSAGE_NOT_FOUND: Final = "kernel.operation.unknown"
-#: 载荷不合法的消息键（参数 ``id``、``reason``）；与 .NET 宿主的目录同键。
+#: 载荷不合法的消息键（参数 ``id``、``reason``）；与 kernel-messages 向量同键，宿主按它再翻译。
 MESSAGE_INVALID_PAYLOAD: Final = "kernel.operation.invalid_payload"
 #: 类型不符的消息键（参数只有 ``id``，ADR-0236）。
 MESSAGE_TYPE_MISMATCH: Final = "kernel.operation.type_mismatch"
@@ -55,7 +55,7 @@ MESSAGE_REGISTRY_FULL: Final = "kernel.operation.registry_full"
 #: 登记表的容量。
 CAPACITY: Final = 10000
 
-#: 调用器内置步骤的归属：内核清单 ID，与 .NET 的内置中间件相同（RFC-0011 规则 10）。
+#: 调用器内置步骤的归属：内核清单 ID（RFC-0011 规则 10）。
 KERNEL_OWNER: Final = "xihan.kernel.core"
 #: Observe 阶段的内置步骤：把排在它之后的中间件与处理器抛出的异常翻译成 ``KERNEL_UNEXPECTED_001``。
 OBSERVE_MIDDLEWARE: Final = "ObserveMiddleware"
@@ -362,7 +362,7 @@ def response_payload_of(ctx: Context) -> bytes | None:
 class Invoker:
     """让操作经过完整管道执行：管道的终点在 ``handle`` 阶段之后分派当前操作。
 
-    调用器带三个内置步骤，位置与 .NET 的内置中间件相同（RFC-0011 规则 10，ADR-0236）：都按归属 ``xihan.kernel.core``
+    调用器带三个内置步骤，位置按 RFC-0011 规则 10（ADR-0236）：都按归属 ``xihan.kernel.core``
     放在所在阶段的 ``Beginning``，与同位置的其他中间件按 RFC-0004 的规则排序（归属的序数序，同归属按登记顺序，内置
     步骤先登记）。
 
@@ -488,7 +488,7 @@ async def _observe(ctx: Context, next_step: Step) -> Result[Unit]:
     """Observe 阶段的内置步骤：下游未处理的异常翻译为 ``KERNEL_UNEXPECTED_001``（RFC-0011 规则 5）。
 
     ``Exception`` 之外的 ``BaseException``（含 ``CancelledError``）照常传播；完整异常经 ``logging`` 记下，上线的错误不带
-    异常文本，``FrameworkError`` 以 ``to_error()`` 作内部错误，与 .NET 的 ``ObserveMiddleware`` 一致。
+    异常文本，``FrameworkError`` 以 ``to_error()`` 作内部错误。
     """
     try:
         return await next_step(ctx)

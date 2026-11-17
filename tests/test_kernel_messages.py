@@ -135,7 +135,7 @@ def test_produced_errors_carry_the_vector_codes_keys_and_arguments(vector: Vecto
         message = messages[error.message_key]
         assert error.code == message["code"], error.message_key
         assert sorted(error.details or {}) == sorted(message["arguments"]), error.message_key
-        # 没有安装目录时 message 就是默认英文模板格式化的结果，上线的 message 与 .NET 宿主的英文一致
+        # 没有安装目录时 message 就是默认英文模板格式化的结果，上线的 message 与向量的英文模板一致
         assert error.message == primitives.format_message(message["template"], error.details), error.message_key
         assert "{" not in error.message, error.message
     duplicate = next(error for error in produced if error.code == operation.ERROR_CODE_DUPLICATE)

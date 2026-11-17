@@ -15,7 +15,7 @@ from xihan_framework.primitives._framework import FrameworkError
 
 #: 默认区域，也是消息目录的回退区域。
 DEFAULT_LOCALE: Final = "en-US"
-#: 消息键的最大长度（RFC-0010「消息键」，与 .NET 的 ``MessageTemplate.MaxKeyLength`` 相同）。
+#: 消息键的最大长度（RFC-0010「消息键」）。
 MAX_MESSAGE_KEY_LENGTH: Final = 128
 
 # 消息键文法 <domain>.<segment>[.<segment>]，首段与后段同形（RFC-0001，2026-10-28 修订后首段可含下划线）
@@ -151,7 +151,7 @@ def _render(template: str, arguments: Mapping[str, object] | None, locale: str |
 
 
 def _segments(template: str) -> Iterator[str | _Placeholder]:
-    """把模板切成字面量与占位符，规则与 .NET 的 ``MessageTemplate`` 逐字相同。
+    """把模板切成字面量与占位符，规则按 RFC-0010「模板」，由 message-templates 向量核对。
 
     每个位置先看 ``{{`` / ``}}`` 转义；``{`` 之后找第一个 ``}``，找不到时其余文本都是字面量；花括号之间第一个 ``:``
     之前是名字，名字不合法时整段（含两个花括号）是字面量，不再在里面找占位符。
@@ -229,7 +229,7 @@ def _format_number(value: int | float, specifier: str | None) -> str:
 
 
 def _fixed(value: int | float, digits: int, *, grouping: bool) -> str:
-    """定点小数：按值的精确十进制展开舍入，正好一半时取偶（与 .NET 一致）；``grouping`` 时整数部分以 ``,`` 分组。
+    """定点小数：按值的精确十进制展开舍入，正好一半时取偶（RFC-0010「模板」）；``grouping`` 时整数部分以 ``,`` 分组。
 
     用局部的 Decimal 上下文：不受进程里改过的全局舍入方式影响，精度足够容纳整数部分，quantize 不会溢出。
     """

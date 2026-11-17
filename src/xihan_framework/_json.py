@@ -170,7 +170,7 @@ def int_to_float(value: int) -> float:
 def shortest_digits(value: float) -> tuple[str, int]:
     """最短往返的十进制数字与小数点位置：``|value| = 0.digits × 10**point``，数字串不含首尾的 0。
 
-    ``repr`` 给出最短往返表示，与 .NET 的 ``double.ToString`` 取的数字相同。
+    ``repr`` 给出最短往返表示，即值模型写浮点时取的数字（RFC-0010「模板」）。
     """
     _, digit_tuple, exponent = Decimal(repr(abs(value))).as_tuple()
     assert isinstance(exponent, int)
@@ -190,7 +190,7 @@ def fixed_notation(digits: str, point: int) -> str:
 
 
 def exponent_notation(digits: str, point: int) -> str:
-    """把数字串写成 .NET 的指数形式：``d[.ddd]E±XX``，指数至少两位。"""
+    """把数字串写成值模型的指数形式：``d[.ddd]E±XX``，指数至少两位（RFC-0010「模板」，ADR-0235）。"""
     exponent = point - 1
     mantissa = digits[0] + ("." + digits[1:] if len(digits) > 1 else "")
     return f"{mantissa}E{'-' if exponent < 0 else '+'}{abs(exponent):02d}"

@@ -7,7 +7,7 @@ from xihan_framework._json import JsonValue
 
 
 class LifecycleState(Enum):
-    """九态生命周期（RFC-0001）：数值与 .NET 枚举、插件协议的 ``LifecycleState`` 一致，文本是 ``Declared`` 这样的名字。"""
+    """九态生命周期（RFC-0001）：数值与插件协议的 ``LifecycleState`` 一致，文本是 ``Declared`` 这样的名字。"""
 
     DECLARED = 0
     RESOLVED = 1

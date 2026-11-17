@@ -1,8 +1,8 @@
 """调用上下文（RFC-0003）：取消、截止时间、W3C 追踪、已登记的 Baggage 与请求作用域对象袋。
 
 不绑定任何协议，载体映射由协议适配器与插件运行时实现。``Context`` 不可变、按派生传递；取消信号 ``Cancellation``
-可以从任何线程触发；``Context.run`` 在截止时间（``asyncio.timeout``）与取消信号下执行协程，把超时与取消翻译成
-``KERNEL_TIMEOUT_001`` / ``KERNEL_CANCELLED_001`` 的失败结果。
+可以从任何线程触发；``Context.run`` 在截止时间与取消信号下执行一次调用，二者只经信号通知、不取消调用的任务
+（RFC-0003 规则 1），调用抛出取消或写下取消结果时翻译成 ``KERNEL_TIMEOUT_001`` / ``KERNEL_CANCELLED_001``。
 """
 
 from xihan_framework.invocation._context import (

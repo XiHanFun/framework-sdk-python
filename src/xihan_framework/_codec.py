@@ -43,8 +43,8 @@ type Decoder = Callable[[JsonValue, str], object]
 class IntRange:
     """整数的取值范围，写在 ``Annotated[int, ...]`` 里；超出范围即类型不符，报该值的路径（RFC-0011 规则 2）。
 
-    Python 只有一种整数，``int`` 按 64 位有符号整数核对；更窄的整数类型（C# 的 ``int``、Go 的 ``int32``）用它声明，
-    如 ``Annotated[int, Int32]``。
+    Python 只有一种整数，``int`` 按 64 位有符号整数核对；规范里更窄的整数（如 payload-reasons 向量的 32 位整数）用它
+    声明，如 ``Annotated[int, Int32]``。
     """
 
     minimum: int
@@ -73,7 +73,7 @@ class DecodeError(Exception):
 def json_field(name: str | None = None, *, omit_none: bool = False) -> dict[str, object]:
     """dataclass 字段在 JSON 里的名字与省略规则，作为 ``dataclasses.field(metadata=...)`` 的值。
 
-    ``name`` 改写成员名（如 ``ttl_ms`` 写成 ``ttlMs``）；``omit_none`` 为真时值为 ``None`` 不写出，相当于 Go 的 ``omitempty``。
+    ``name`` 改写成员名（如 ``ttl_ms`` 写成 ``ttlMs``）；``omit_none`` 为真时值为 ``None`` 不写出，可选成员没有值时不出现在 JSON 里。
     """
     metadata: dict[str, object] = {}
     if name is not None:
@@ -106,7 +106,7 @@ def encode(value: object) -> JsonValue:
             members[str(field.metadata.get(JSON_NAME, field.name))] = encode(member)
         return members
     if isinstance(value, Mapping):
-        # 映射的键按字典序写出，与 Go 编码 map 一致；dataclass 与 SDK 原语保持声明顺序
+        # 映射的键按字典序写出，输出不随插入顺序变化（规范按 JSON 值比较，成员顺序不是契约）；dataclass 与 SDK 原语保持声明顺序
         items: list[tuple[object, object]] = list(value.items())
         for key, _ in items:
             if not isinstance(key, str):

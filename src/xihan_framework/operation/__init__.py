@@ -1,8 +1,8 @@
 """操作契约与 XGI 消息（RFC-0011）：业务以操作为单位声明，调用器让它经过完整管道并在 ``handle`` 阶段执行。
 
 请求与响应是普通的 dataclass（或其他可解码的类型，见 ``Registry.add``），用标准库按 JSON 编解码，JSON 是 XGI 的规范编码；
-成员名可用 ``json_field`` 改写。处理器与调用器都是 ``async``。调用器带三个与 .NET 内置中间件同位置的内置步骤
-（``ObserveMiddleware``、``DeadlineMiddleware``、``ValidationMiddleware``，见 ``Invoker``）。
+成员名可用 ``json_field`` 改写。处理器与调用器都是 ``async``。调用器带三个内置步骤（``ObserveMiddleware``、
+``DeadlineMiddleware``、``ValidationMiddleware``，位置按 RFC-0011 规则 10，见 ``Invoker``）。
 """
 
 from xihan_framework._codec import Int32, IntRange, json_field

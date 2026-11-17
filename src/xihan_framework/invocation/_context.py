@@ -38,7 +38,6 @@ MESSAGE_CANCELLED: Final = "kernel.invocation.cancelled"
 #: 调用开始时截止时间已过的消息键（码同样是 ``KERNEL_TIMEOUT_001``）。
 MESSAGE_DEADLINE_BEFORE_START: Final = "kernel.invocation.deadline_before_start"
 
-# W3C traceparent：version-traceid-spanid-flags，全小写十六进制
 # W3C traceparent 只认版本 00 与小写十六进制（RFC-0003 规则 7，ADR-0235）；其他版本、大写、多余的段都不合法
 _TRACE_PARENT = re.compile(r"00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})")
 _TRACE_ID = re.compile(r"[0-9a-f]{32}")
@@ -415,7 +414,7 @@ class Context:
         """在截止时间与取消信号下执行 ``call``，超时与取消翻译成失败结果；调用器的 Resilience 阶段内置步骤就是它。
 
         进入时截止时间已过即返回 ``KERNEL_TIMEOUT_001`` + ``kernel.invocation.deadline_before_start``，``call`` 不执行；
-        进入时不核对取消（RFC-0011 规则 10，ADR-0236，与 .NET 的 ``DeadlineMiddleware`` 一致）。
+        进入时不核对取消（RFC-0011 规则 10，ADR-0236）。
 
         ``call`` 收到一个派生的上下文，它的取消信号在调用方的信号触发或到达截止时间时触发。取消与截止时间只经这个信号
         通知（RFC-0003 规则 1，ADR-0236）：不取消 ``call`` 所在的任务，``call`` 自己看信号（``is_cancelled``、

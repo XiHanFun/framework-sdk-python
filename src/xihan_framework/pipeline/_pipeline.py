@@ -99,8 +99,8 @@ class Descriptor:
 class _Registration:
     """一次登记；``order`` 是登记序号，同一位置、同一归属时按它排。
 
-    ``before`` / ``after`` 是以它为主体的按名字约束（它排在这些名字之前 / 之后），与 .NET 一样挂在主体上，排序时
-    按基准次序逐个主体解析目标。
+    ``before`` / ``after`` 是以它为主体的按名字约束（它排在这些名字之前 / 之后）：主体在声明时就已登记，目标到排序时
+    才解析（RFC-0004 排序规则第 7 条），所以约束挂在主体上，排序时按基准次序逐个主体解析目标。
     """
 
     middleware: Middleware
@@ -114,8 +114,8 @@ class Builder:
     """收集中间件与顺序约束，按规范排序后构建管道。
 
     重复登记、未知阶段与约束主体的问题在登记时抛出，约束目标的问题与成环在 ``describe`` / ``dump`` / ``build`` 排序时
-    抛出（RFC-0004 排序规则第 8 条），都是 ``FrameworkError``（``KERNEL_PIPELINE_00x``），消息是与 .NET 逐字相同的英文
-    原文，按名字登记的实例写成 ``类型名[名字]``。``build`` 返回的管道是当时登记内容的快照，之后的登记不影响它。
+    抛出（RFC-0004 排序规则第 8 条），都是 ``FrameworkError``（``KERNEL_PIPELINE_00x``），消息是各语言逐字相同的英文
+    原文（ordering 向量），按名字登记的实例写成 ``类型名[名字]``。``build`` 返回的管道是当时登记内容的快照，之后的登记不影响它。
     """
 
     __slots__ = ("_registrations",)
@@ -154,7 +154,7 @@ class Builder:
     def before(self, middleware: str, other: str) -> Self:
         """约束 ``middleware`` 在 ``other`` 之前。
 
-        两端都是中间件名：按名字登记的实例只按实例名引用，默认实例按类型名引用（与 .NET 的按名字约束相同）。约束主体
+        两端都是中间件名：按名字登记的实例只按实例名引用，默认实例按类型名引用（RFC-0004 排序规则第 7 条）。约束主体
         ``middleware`` 在声明时必须已登记且没有歧义，否则立即抛出 ``KERNEL_PIPELINE_003``；目标 ``other`` 在排序时解析
         （RFC-0004 排序规则第 7、8 条）。
         """
@@ -229,7 +229,7 @@ class Builder:
         return self
 
     def _check_unique(self, descriptor: Descriptor) -> None:
-        """同一类型的默认实例只登记一次、命名实例的名字在类型内唯一；与 .NET 一样在登记时报，不推迟到排序。"""
+        """同一类型的默认实例只登记一次、命名实例的名字在类型内唯一；在登记时报，不推迟到排序（RFC-0004 排序规则第 8 条）。"""
         for registration in self._registrations:
             existing = registration.descriptor
             if (existing.middleware, existing.instance) != (descriptor.middleware, descriptor.instance):
@@ -249,8 +249,8 @@ class Builder:
     def _sorted(self) -> list[_Registration]:
         """按规则排序：先阶段；阶段内先位置，再归属的序数序，再登记顺序，最后按约束做稳定拓扑排序。
 
-        与 .NET 一样逐个阶段处理：一个阶段的约束目标都解析完（目标的错误在这里报）再排序（成环在这里报），然后才轮到
-        下一个阶段，所以先报哪个错与 .NET 相同。
+        逐个阶段处理：一个阶段的约束目标都解析完（目标的错误在这里报）再排序（成环在这里报），然后才轮到下一个阶段，
+        所以多处出错时先报排在前面的阶段里的那一个（报出时机见 RFC-0004 排序规则第 8 条）。
         """
         ordered: list[_Registration] = []
         for stage in PipelineStage:
@@ -329,7 +329,7 @@ def _link(middleware: Middleware, downstream: Step) -> Step:
 
 
 def _ordinal(text: str) -> bytes:
-    """按 UTF-16 码元比较的排序键，与 .NET 的 ``StringComparer.Ordinal`` 相同。"""
+    """按 UTF-16 码元比较的排序键：归属按序数序逐个 UTF-16 码元比较（RFC-0004 排序规则第 3 条）。"""
     return text.encode("utf-16-be", "surrogatepass")
 
 

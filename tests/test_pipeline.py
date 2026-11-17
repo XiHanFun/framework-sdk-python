@@ -1,4 +1,4 @@
-"""pipeline 的测试：Go SDK 移植来的排序、约束、命名实例与短路用例，以及打印格式与快照语义。"""
+"""pipeline 的测试：排序、约束、命名实例与短路，以及打印格式与快照语义；ordering 向量另行回放。"""
 
 import asyncio
 from collections.abc import Callable
@@ -101,7 +101,7 @@ def test_constraints_only_move_what_they_must() -> None:
 
 
 def test_cycles_and_bad_constraints_are_rejected() -> None:
-    # 消息是与 .NET 逐字相同的英文原文（RFC-0004 规则 8，ADR-0236）
+    # 消息是各语言逐字相同的英文原文（RFC-0004 规则 8，ADR-0236）
     cycle = (
         Builder()
         .use_at(passthrough("A"), PipelineStage.VALIDATE)
@@ -130,7 +130,7 @@ def test_cycles_and_bad_constraints_are_rejected() -> None:
         "can be declared between them."
     )
 
-    # 与 .NET 一样逐个阶段解析与排序：前一个阶段成环先于后一个阶段的目标未登记
+    # 逐个阶段解析与排序：前一个阶段成环先于后一个阶段的目标未登记（RFC-0004 规则 8）
     both = (
         Builder()
         .use_at(passthrough("A"), PipelineStage.OBSERVE)
@@ -171,7 +171,7 @@ def test_named_instances_are_referenced_by_their_names() -> None:
     descriptors = builder.describe()
     assert descriptors[0].instance == "guard-a"
     assert descriptors[0].owner == "xihan.plugins.a"
-    # 与 .NET 的按名字约束相同：命名实例只按实例名引用，类型名对它们不算登记过
+    # 按名字的约束：命名实例只按实例名引用，类型名对它们不算登记过（RFC-0004 规则 7）
     builder.use_at(passthrough("Other"), PipelineStage.OBSERVE)
     with pytest.raises(FrameworkError) as raised:
         builder.before("Guard", "Other")
@@ -338,7 +338,7 @@ def test_ordering_follows_the_vectors(vector: Callable[[str, str], Any]) -> None
         builder = Builder()
         for step in case["steps"]:
             _apply(builder, step)
-        # 打印全文与 .NET 的 PipelineBuilder 逐字相同，{type} 换成这里给命名实例用的类型名
+        # 打印全文与向量逐字相同，{type} 换成这里给命名实例用的类型名
         assert builder.dump() == case["dump"].replace("{type}", TYPE_NAME), case["name"]
     for case in vectors["errors"]:
         builder = Builder()
