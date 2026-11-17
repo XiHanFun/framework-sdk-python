@@ -19,8 +19,23 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "examples" / "echo"
 RUNNER = ROOT / "spec" / "conformance"
-#: 黑盒运行器的全部用例。
-CASES = {"handshake", "refusal", "session", "lifecycle", "unknown-operation", "declared-operations", "event", "stdin"}
+#: 黑盒运行器的全部用例（spec/conformance/README.md）。
+CASES = {
+    "handshake",
+    "refusal",
+    "session",
+    "lifecycle",
+    "order",
+    "unknown-operation",
+    "declared-operations",
+    "unavailable",
+    "event",
+    "unsubscribed",
+    "stream",
+    "configuration",
+    "stop-early",
+    "stdin",
+}
 
 
 def write_launcher(directory: Path) -> str:

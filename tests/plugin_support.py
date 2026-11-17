@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import io
 import json
 import os
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -32,6 +33,8 @@ from xihan_framework.plugin.v1 import plugin_pb2_grpc as pb_grpc
 
 #: 测试用的会话令牌。
 TOKEN = "dGVzdC1zZXNzaW9uLXRva2VuLXdpdGgtMzItYnl0ZXMtb2YtZW50cm9weQ"
+#: Windows 上的 .NET 宿主排在回环 TCP 之前的命名管道端点：grpcio 连不了，插件跳过它。
+PIPE = Endpoint(Network.NPIPE, r"\\.\pipe\xihan-host-tests")
 
 
 def manifest_text(**overrides: Any) -> str:
@@ -93,15 +96,53 @@ class Running:
         """以宿主的身份握手。"""
         return await self.stub.Handshake(handshake_request(), metadata=session())
 
-    async def start(self, configuration: str = "{}") -> None:
+    async def configure(self, configuration: str = "{}", **options: Any) -> pb.ConfigureResponse:
+        """配置；默认授予清单声明的两项回调权限。"""
+        options.setdefault("granted_permissions", ["capability:kernel.pipeline", "capability:messaging.queue"])
+        return await self.stub.Configure(
+            pb.ConfigureRequest(configuration=configuration, work_directory=".", **options), metadata=session()
+        )
+
+    async def health(self) -> pb.HealthResponse:
+        """求一次健康。"""
+        return await self.stub.Health(pb.HealthRequest(), metadata=session())
+
+    async def start(self, configuration: str = "{}") -> pb.StartResponse:
         """握手、配置并启动，三步都必须成功。"""
         await self.handshake()
-        configured = await self.stub.Configure(
-            pb.ConfigureRequest(configuration=configuration, work_directory="."), metadata=session()
-        )
+        configured = await self.configure(configuration)
         assert configured.status.ok, configured.status
         started = await self.stub.Start(pb.StartRequest(), metadata=session())
         assert started.status.ok, started.status
+        return started
+
+    async def stop(self, grace_seconds: int = 5, reason: str = "unload") -> pb.StopResponse:
+        """停止。"""
+        return await self.stub.Stop(pb.StopRequest(grace_seconds=grace_seconds, reason=reason), metadata=session())
+
+    async def exited(self) -> None:
+        """等 ``serve`` 结束，最多 10 秒。"""
+        await asyncio.wait_for(asyncio.shield(self.task), 10)
+
+
+def run_scenario(scenario: Callable[[], Coroutine[Any, Any, None]]) -> None:
+    """在新的事件循环里跑一个场景，整体限时；循环关闭之前等 gRPC 的收尾事件送达。
+
+    grpc.aio 的完成队列线程把事件交给创建 gRPC 对象时的事件循环：循环关闭之后才到的事件（如被取消的调用、停止的服务端
+    的收尾）会让这个线程退出，之后的循环里 gRPC 调用再也等不到完成。所以场景结束时先让出事件循环、回收没人引用的 gRPC
+    对象，让它们在循环还开着时收尾。插件进程只有一个事件循环，没有这个问题。
+    """
+
+    async def bounded() -> None:
+        try:
+            async with asyncio.timeout(60):
+                await scenario()
+        finally:
+            await asyncio.sleep(0.2)
+            gc.collect()
+            await asyncio.sleep(0.05)
+
+    asyncio.run(bounded())
 
 
 def session(token: str = TOKEN) -> tuple[tuple[str, str], ...]:
@@ -121,7 +162,7 @@ def handshake_request(*versions: int) -> pb.HandshakeRequest:
 
 
 def environment(**extra: str) -> dict[str, str]:
-    """宿主下发的环境变量。"""
+    """宿主下发的环境变量（不含回调端点）。"""
     return {
         ENV_PROTOCOL_VERSIONS: "1",
         ENV_PRIMITIVES: "1",
@@ -130,6 +171,11 @@ def environment(**extra: str) -> dict[str, str]:
         ENV_LOCALE: "en-US",
         **extra,
     }
+
+
+def env_with_host(*endpoints: Endpoint) -> dict[str, str]:
+    """带宿主回调端点列表的环境变量：按给出的顺序以 ``;`` 分隔（handshake.md §4）。"""
+    return environment(**{ENV_HOST_ADDRESS: ";".join(str(endpoint) for endpoint in endpoints)})
 
 
 @contextlib.asynccontextmanager
@@ -169,26 +215,47 @@ async def running(plugin: Plugin, environ: Mapping[str, str] | None = None) -> A
         stdout.close()
 
 
+@dataclass(frozen=True)
+class Received:
+    """假宿主收到的一次回调：请求、元数据里的文本值与 gRPC 的剩余时间。"""
+
+    request: Any
+    metadata: dict[str, str]
+    remaining: float | None
+
+
 @dataclass
 class FakeHost(pb_grpc.HostServicer):
-    """记录回调的假宿主：``Invoke`` 回 ``{"ok":true}``，``Publish`` 逐项成功。"""
+    """记录回调的假宿主：``Invoke`` 默认回 ``{"ok":true}``，``Publish`` 默认逐项成功。
 
-    invocations: list[tuple[pb.InvokeRequest, dict[str, str]]] = field(default_factory=list)
-    publications: list[tuple[pb.PublishRequest, dict[str, str]]] = field(default_factory=list)
+    ``status`` 不为空时以这个 gRPC 状态（消息 ``message``）结束调用；``invoke_status`` 与 ``publish_results`` 改写应答。
+    """
+
+    invocations: list[Received] = field(default_factory=list)
+    publications: list[Received] = field(default_factory=list)
     status: grpc.StatusCode | None = None
+    message: str = "boom"
+    invoke_status: pb.Status | None = None
+    publish_results: list[pb.Status] | None = None
 
     async def Invoke(  # noqa: N802
         self, request: pb.InvokeRequest, context: grpc.aio.ServicerContext[Any, Any]
     ) -> pb.InvokeResponse:
-        self.invocations.append((request, _metadata(context)))
+        self.invocations.append(Received(request, _metadata(context), context.time_remaining()))
         if self.status is not None:
-            await context.abort(self.status, "refused by the fake host")
+            await context.abort(self.status, self.message)
+        if self.invoke_status is not None:
+            return pb.InvokeResponse(status=self.invoke_status)
         return pb.InvokeResponse(status=pb.Status(ok=True), payload=b'{"ok":true}')
 
     async def Publish(  # noqa: N802
         self, request: pb.PublishRequest, context: grpc.aio.ServicerContext[Any, Any]
     ) -> pb.PublishResponse:
-        self.publications.append((request, _metadata(context)))
+        self.publications.append(Received(request, _metadata(context), context.time_remaining()))
+        if self.status is not None:
+            await context.abort(self.status, self.message)
+        if self.publish_results is not None:
+            return pb.PublishResponse(results=self.publish_results)
         return pb.PublishResponse(results=[pb.Status(ok=True) for _ in request.envelopes])
 
 
@@ -209,8 +276,3 @@ async def fake_host() -> AsyncIterator[tuple[FakeHost, Endpoint]]:
         yield host, Endpoint(Network.TCP, f"127.0.0.1:{port}")
     finally:
         await server.stop(None)
-
-
-def env_with_host(endpoint: Endpoint) -> dict[str, str]:
-    """带宿主回调端点的环境变量。"""
-    return environment(**{ENV_HOST_ADDRESS: str(endpoint)})

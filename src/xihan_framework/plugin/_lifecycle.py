@@ -8,7 +8,7 @@ from typing import Final
 
 from xihan_framework.primitives import Error, LifecycleState
 
-#: 插件可以自报的状态（lifecycle.md §1）；其余由宿主裁决。
+#: 插件可以自报的状态（lifecycle.md §1）；其余由宿主裁决，``Start`` 之前的 ``Health`` 照实报本地状态（§7.4）。
 SELF_REPORTED_STATES: Final = frozenset(
     {
         LifecycleState.STARTED,
@@ -18,8 +18,10 @@ SELF_REPORTED_STATES: Final = frozenset(
         LifecycleState.FAILED,
     }
 )
-#: 接受调用与事件投递的状态：``Start`` 成功之后、``Stop`` 之前（lifecycle.md §2、§5）。
-SERVING_STATES: Final = frozenset({LifecycleState.STARTED, LifecycleState.READY, LifecycleState.DEGRADED})
+#: 可服务的状态：只有在这两种状态下调用与投递才执行，其余状态以 ``plugins.process.unavailable`` 失败（lifecycle.md §7.3）。
+SERVING_STATES: Final = frozenset({LifecycleState.READY, LifecycleState.DEGRADED})
+#: 健康回调报了就照办的状态（lifecycle.md §7.4）；报其他状态的不改变状态。
+HEALTH_REPORTED_STATES: Final = frozenset({LifecycleState.READY, LifecycleState.DEGRADED, LifecycleState.FAILED})
 
 
 class Lifecycle:
@@ -60,6 +62,16 @@ class Lifecycle:
         for listener in listeners:
             listener()
         return True
+
+    def report(self, error: Error | None) -> None:
+        """状态不变而原因变了（健康回调在 ``Degraded`` 里报了另一个原因）：换掉原因，有变化时通知订阅者。"""
+        with self._lock:
+            if self._error == error:
+                return
+            self._error = error
+            listeners = list(self._listeners.values())
+        for listener in listeners:
+            listener()
 
     def notify(self) -> None:
         """状态没变而健康项可能变了：通知订阅者重新计算健康。"""

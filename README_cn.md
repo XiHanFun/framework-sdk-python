@@ -33,7 +33,7 @@
 | `invocation` | 不可变的 `Context`：截止时间、可跨线程触发的 `Cancellation`、W3C 追踪（`traceparent` 只认版本 `00` 与小写十六进制、不合法的当作没给，采样只看标志的最低位，写出只带采样位 `00` / `01`，没有上游时写 `01`）、已登记的 Baggage（已登记键的值非空、按 UTF-16 码元计最多 256、不含控制字符，由一组 Baggage 构造上下文时丢弃不合的成员，`with_baggage` 给出不合的值则抛 `ValueError`，幂等键两种情形都例外）、类型化键的对象袋；`Context.run(call)` 进入时截止时间已过即返回 `KERNEL_TIMEOUT_001` + `kernel.invocation.deadline_before_start`（不核对取消），之后把一个派生的上下文交给 `call`，它的信号在调用方取消或到达截止时间时触发；取消与截止时间只经信号通知，不取消 `call` 的任务，`call` 抛出 `CancelledError` 或写下取消结果时翻译为 `KERNEL_TIMEOUT_001` / `KERNEL_CANCELLED_001`，照常返回的结果原样交回 | RFC-0003 |
 | `pipeline` | 固定阶段的 `Builder`：`use` / `use_at` / `use_named_instance`、`before` / `after`（按类型名或实例名）、阶段可写成清单里的名字、`extend` 接上另一个构建器；命名实例只按实例名引用、默认实例按类型名引用；重复登记、未知阶段与约束主体未登记或有歧义在登记时报，约束目标的问题与成环在排序时报（逐个阶段处理），消息是各语言逐字相同的英文原文，命名实例写成 `类型名[名字]`，成环时列出全部卡住的中间件；`describe` / `dump`、`build`；排序规则与错误码 `KERNEL_PIPELINE_00x` | RFC-0004 |
 | `operation` | `Contract`、`Schema`、异步处理器、容量 10000 的 `Registry`、经完整管道执行的 `Invoker`（XGI：JSON 请求与响应，带三个内置步骤）与类型化入口 `invoke_typed` | RFC-0011 |
-| `plugin` | 进程外插件运行时（协议 `xihan.plugin.v1`）：`Plugin` 读宿主下发的环境变量，在本机端点上以 `grpc.aio` 提供 `Plugin` 服务，写握手行，stdin 关闭或收到 SIGTERM 即收尾退出；每个 RPC 先按常数时间核对会话令牌；生命周期状态机与健康推送；调用经 SDK 的 `Invoker` 与完整管道执行，事件按（主题，订阅方式，类型）交给处理器；宿主回调客户端 `Host`（`invoke` 与批量的 `publish`）；stderr 上的 JSON 日志；运行时的消息目录（10 种区域）。协议代码在 `plugin.v1`，由 `spec/plugin/plugin.proto` 生成。依赖 grpcio 与 protobuf，装 extra：`pip install "xihan-framework[plugin]"` | RFC-0017、`spec/plugin/` |
+| `plugin` | 进程外插件运行时（协议 `xihan.plugin.v1`）：`Plugin` 在监听之前核对清单与声明，读宿主下发的环境变量，在本机端点上以 `grpc.aio` 提供 `Plugin` 服务并写握手行；每个 RPC 先按常数时间核对会话令牌；按 lifecycle.md §7 处理调用次序、配置（含类型化读取）、就绪、健康、停止，以及 stdin 关闭或 SIGTERM 的收尾（最多 3 秒）；调用经 SDK 的 `Invoker` 与完整管道执行，事件按（主题，订阅方式，类型）依次交给处理器；宿主回调客户端 `Host`（`invoke` 与批量的 `publish`，端点取 `XIHAN_PLUGIN_HOST_ADDRESS` 里第一个 grpcio 能连的项，发出前在本地核对权限与租户）；stderr 上的 JSON 日志；运行时的消息目录（10 种区域，供本地渲染，不随握手发送）。协议代码在 `plugin.v1`，由 `spec/plugin/plugin.proto` 生成。依赖 grpcio 与 protobuf，装 extra：`pip install "xihan-framework[plugin]"` | RFC-0017、`spec/plugin/` |
 
 ## 快速开始
 
@@ -117,7 +117,7 @@ from pathlib import Path
 
 from xihan_framework import operation
 from xihan_framework.invocation import Context
-from xihan_framework.plugin import Envelope, Plugin, Subscription, SubscriptionHandler
+from xihan_framework.plugin import Envelope, Plugin, Subscription, SubscriptionHandler, run
 from xihan_framework.primitives import Result, Unit, ok, success
 
 
@@ -135,14 +135,17 @@ async def on_event(ctx: Context, envelope: Envelope, attempt: int) -> Result[Uni
     return success()
 
 
-registry = operation.Registry()
-registry.add(operation.Contract("echoes.create"), echo, request_type=Echo, response_type=Echo)
-plugin = Plugin(
-    Path(__file__).with_name("xihan.manifest.json").read_bytes(),
-    operations=registry,
-    subscriptions=[SubscriptionHandler(Subscription("echo.events"), on_event)],
-)
-sys.exit(plugin.run())
+def build() -> Plugin:
+    registry = operation.Registry()
+    registry.add(operation.Contract("echoes.create"), echo, request_type=Echo, response_type=Echo)
+    return Plugin(
+        Path(__file__).with_name("xihan.manifest.json").read_bytes(),
+        operations=registry,
+        subscriptions=[SubscriptionHandler(Subscription("echo.events"), on_event)],
+    )
+
+
+sys.exit(run(build))
 ```
 
 清单 `xihan.manifest.json` 与脚本放在插件目录里：
@@ -162,7 +165,7 @@ sys.exit(plugin.run())
 }
 ```
 
-1. 清单要点：`kind` 为 `plugin`、`isolation` 为 `out-of-process`，不写 `contributes.pipeline`（只有 Wasm 插件能贡献中间件，`Plugin` 构造时就拒绝）；登记的每个操作都要列在 `contributes.operations`，健康项列在 `contributes.health`，配置节写在 `contributes.config.section`（宿主还要授予 `config:<配置节>`）；回调宿主要在 `permissions` 里声明 `capability:kernel.pipeline`（`Host.invoke`）与 `capability:messaging.queue`（`Host.publish`）。握手交给宿主的是 `Plugin` 收到的清单文本（省略时读工作目录里的文件），必须与插件目录里的文件一致。
+1. 清单与启动前的核对：`kind` 为 `plugin`、`isolation` 为 `out-of-process`，不写 `contributes.pipeline`（只有 Wasm 插件能贡献中间件），`primitives` 是本 SDK 实现的原语层大版本 `1`；登记的每个操作都要列在 `contributes.operations`，健康项列在 `contributes.health`，配置节写在 `contributes.config.section`（宿主还要授予 `config:<配置节>`）；回调宿主要在 `permissions` 里声明 `capability:kernel.pipeline`（`Host.invoke`）与 `capability:messaging.queue`（`Host.publish`）。`Plugin` 构造时核对这些，以及订阅（同一（主题，类型）只声明一次）与消息目录（含 `en-US`，不能用运行时目录的名字 `plugins.protocol`），不合即抛出 `FrameworkError`。进程入口 `run(build)` 构造插件，构造失败时不监听、不写握手行，在 stderr 记一条 `error` 日志后以退出码 1 结束，宿主看到的是进程在握手之前退出（handshake.md §1）。握手交给宿主的是 `Plugin` 收到的清单文本去掉开头的 BOM（省略时读工作目录里的文件），必须与插件目录里的文件一致。
 2. 启动脚本：`entry` 是相对插件目录的可执行文件。宿主只继承 `PATH`、用户目录、临时目录等少数环境变量（handshake.md §1），所以脚本里写解释器与插件脚本的绝对路径，不依赖 `VIRTUAL_ENV`。Unix 上是带 shebang 的 sh 脚本，并 `chmod +x`；Windows 上是 `.cmd`，`entry` 写 `echo.cmd`（没有扩展名时宿主补的是 `.exe`）。
 
    ```sh
@@ -175,11 +178,14 @@ sys.exit(plugin.run())
    "C:\path\to\.venv\Scripts\python.exe" "C:\path\to\echo\echo.py" %*
    ```
 
-3. 端点：默认是 Unix 域套接字，Linux、macOS 与 Windows 都用它（Windows 10 1803 起支持 AF_UNIX，grpcio 在 Windows 上同样能监听 `unix:` 地址）。套接字放在本进程新建的私有目录里（`mkdtemp`：名字随机、权限 `0700`、只新建不复用），套接字文件 `0600`，停止后删除；Windows 上 `chmod` 只管只读位，私有目录在当前用户的临时目录下，靠目录的访问控制。`Plugin(network=Network.TCP)` 改为只绑定 `127.0.0.1` 的随机端口，同机的其他用户连得上，隔离只靠会话令牌。grpcio 不支持 Windows 命名管道：插件不监听 `npipe`；宿主回调端点是 `npipe` 时（如 Windows 上的 .NET 宿主），`Host` 的每次回调都以 `PLUGINS_UNAVAILABLE_001` 失败。
-4. 生命周期：每个 RPC 先按常数时间核对元数据 `xihan-plugin-session`，缺失、多于一个或不对时以 `Unauthenticated` 拒绝、不执行。`Handshake` 选宿主列表里最高的共同版本（没有即 `FailedPrecondition`），交出清单、操作声明（契约与 JSON Schema）、订阅与消息目录，进入 `Resolved`；`Configure` 把配置节、授予的权限、绑定与工作目录交给 `Hooks.configure`；`Start` 成功后直接报 `Ready`。`Hooks.health` 报的健康项只留清单声明了的，报的状态按迁移表生效；`WatchHealth` 先推当前状态，之后变化时各推一条（至少每秒重新计算一次）。`Stop` 进入 `Draining`：新调用返回 `PLUGINS_UNAVAILABLE_001`，在宽限期内等在途调用结束，再调用 `Hooks.stop`，应答之后退出；stdin 关闭或收到 SIGTERM 时立即触发在途调用的取消信号，收尾后退出。
-5. 调用与事件：`Invoke` 按 invocation.md §2 从元数据还原调用上下文（追踪；截止时间取元数据与 gRPC 调用中较早的那个；只收已登记的 Baggage），经 `Invoker` 与完整管道执行；未登记的操作以 `Unimplemented` 结束。调用方取消或截止时间到了只触发信号，不取消处理器的任务（RFC-0003 规则 1）。本 SDK 的操作都是一元的：`InvokeStream` 的第一帧不是 `start` 时为 `InvalidArgument`，否则为 `Unimplemented`。`HandleEvent` 只交给以这次投递的方式（`mode`，空同 `competing`）订阅了该主题、类型为空或相同的处理器，依次执行，第一个失败即投递结果；没有匹配的订阅时返回 `PLUGINS_UNEXPECTED_001`。
-6. 回调：`host_of(ctx)` 取宿主客户端，`await host.invoke(ctx, "orders.create", payload)` 与 `await host.publish(ctx, envelopes)`（批量，逐项结果）带会话令牌，以及上下文的追踪、截止时间与已登记的 Baggage。上下文或信封（扩展属性 `xihantenant`）带的租户必须是某个进行中的调用里宿主交给插件的租户，否则不发出调用，直接返回 `PLUGINS_DENIED_002` + `plugins.callback.tenant_denied`；宿主拒绝回调（`Unauthenticated`、`PermissionDenied`）也是 `PLUGINS_DENIED_002`。
-7. 错误与日志：业务失败走 `Status.error`，gRPC 状态只表示传输失败。错误的 `text` 先按进程默认的解析器、再按插件的 `catalogs` 在宿主的默认区域里解析，宿主按消息键用握手时拿到的目录再翻译。运行时自己的错误用消息键 `plugins.*`（`PLUGINS_UNAVAILABLE_001`、`PLUGINS_DENIED_002`、`PLUGINS_UNEXPECTED_001`），10 种区域的目录是 `plugin.CATALOG`（目录名 `plugins.protocol`），要随握手交给宿主时放进 `catalogs`。`Plugin.run()` 在根日志没有处理器时接上 `JsonLogHandler`：stderr 一行一个 JSON 对象，`level` 为 `trace` / `debug` / `information` / `warning` / `error` / `critical`，另有 `message` 与其余作用域属性（invocation.md §6）。
+3. 插件端点：默认是 Unix 域套接字，Linux、macOS 与 Windows 都用它（Windows 10 1803 起支持 AF_UNIX，grpcio 在 Windows 上同样能监听 `unix:` 地址）。套接字放在本进程新建的私有目录里（`mkdtemp`：名字随机、权限 `0700`、只新建不复用），套接字文件 `0600`，停止后删除；Windows 上 `chmod` 只管只读位，私有目录在当前用户的临时目录下，靠目录的访问控制。握手行的地址不能有空白（handshake.md §2 的空白集合），临时目录的路径带空白（如带空格的用户名）时改为监听回环 TCP。`Plugin(network=Network.TCP)` 只绑定 `127.0.0.1` 的随机端口，握手行写 `127.0.0.1:<端口>`，同机的其他用户连得上，隔离只靠会话令牌。grpcio 不支持 Windows 命名管道，插件不监听 `npipe`，命名管道的访问控制因此不涉及本 SDK。
+4. 回调端点：`XIHAN_PLUGIN_HOST_ADDRESS` 是宿主按偏好排好、以 `;` 分隔的端点列表（handshake.md §4），任何一项不合法整个值就不合法。SDK 按顺序取第一个 `unix` 或 `tcp` 项（grpcio 连不了命名管道），之后不换；宿主总把回环 TCP 放在最后，所以 Windows 上的 .NET 宿主（`npipe \\.\pipe\…;tcp 127.0.0.1:…`）经回环 TCP 回调，其他系统经 Unix 域套接字回调。变量缺失、不合法或没有能连的项时插件照常服务，启动时在 stderr 记一条 `warning`，每次回调都以 `PLUGINS_UNAVAILABLE_001` + `plugins.host.unavailable`（`reason` 为 `no supported callback endpoint`）失败、不发请求。
+5. 次序、配置与就绪（lifecycle.md §7.1–§7.3）：每个 RPC 先按常数时间核对元数据 `xihan-plugin-session`，必须恰好一个值，缺失、两个及以上（即使其中一个对）或不对都以 `Unauthenticated` 拒绝，先于次序核对与读流的第一帧。`Handshake` 只在 `Declared` 接受，`Configure` 只在 `Resolved`，`Start` 只在 `Configured`，`Stop` 在握手之前、停止中与停止之后不接受；不在次序表里的调用以 `FailedPrecondition` 拒绝，状态不变。`Handshake` 选宿主列表里最高的共同版本（没有即 `FailedPrecondition`），交出清单、只有一元操作的声明（契约与 JSON Schema）、按声明顺序且 `mode` 总写 `competing` 或 `broadcast` 的订阅，以及作者自己的消息目录。`Configure` 的配置节为空等同 `{}`；不是 JSON 对象（含通不过共同的 JSON 读取检查）时不调 `Hooks.configure`，以 `PLUGINS_UNEXPECTED_001` + `plugins.process.failed`（`phase` 为 `configure`，`reason` 为 `the configuration is not a JSON object`）进入 `Failed`。配置节原样交给作者（宿主写出的叶子都是字符串），`Configuration.decode(T)` 按类型读：成员名按 ASCII 不区分大小写匹配，字符串叶子按 JSON 数字文法读成 `int` / `float`，`true` / `false`（ASCII 不区分大小写）读成 `bool`，读不出时抛出带 JSON 路径的 `FrameworkError`。`Start` 在启动回调成功后进入 `Started`，有健康回调时立即求一次，按结果进入 `Ready`、`Degraded` 或 `Failed` 之后才应答；只有 `Ready` 与 `Degraded` 可服务，其余状态下的调用与投递以 `PLUGINS_UNAVAILABLE_001` + `plugins.process.unavailable`（`state` 是状态名，如 `Configured`）失败。
+6. 健康（lifecycle.md §7.4）：`Health` 与 `WatchHealth` 任何状态都可以调用；`Start` 之前报本地状态（`Declared`、`Resolved`、`Configured`），没有健康项、不调回调。可服务期间每次 `Health` 都求一次 `Hooks.health`：报 `Ready`、`Degraded`、`Failed` 的照办（`Failed` 之后不再回来），报其他状态的不改变状态；名字不在 `contributes.health` 里的健康项丢掉，同一个名字只记一条 `warning`；回调抛出时这一次报 `Degraded`，`error` 为 `plugins.process.failed`（`phase` 为 `health`），没有健康项。`WatchHealth` 先推当前状态，之后状态、健康项或 `error` 变化时推送，可服务期间每 10 秒重新求一次回调，进入 `Draining` 时推一次，应答 `Stop` 之后结束流。
+7. 停止与收尾（lifecycle.md §7.5–§7.7）：启动回调没有成功过时 `Stop` 不调 `Hooks.stop`，应答 `ok` 后以退出码 0 退出。启动成功过的进入 `Draining`（之后进入 `Failed` 的不迁移），新的调用与投递返回 `PLUGINS_UNAVAILABLE_001`，在途调用最长等到宽限期（`grace_seconds` 为 0 按 5 秒），到时触发它们的取消信号、不再等，然后调 `Hooks.stop(reason, grace)`（进程里最多一次），应答后以退出码 0 退出；停止回调失败或抛出写进 `StopResponse.status`，照常退出。stdin 读到结尾或收到 SIGTERM 时，可服务的插件进入 `Draining`，立即触发全部在途调用的取消信号并等它们结束，启动成功过而停止回调还没调过的调一次 `Hooks.stop("shutdown", …)`；从收到起最多 3 秒（短于宿主发出终止信号后再等的 5 秒），进行中的 `Stop` 同样受这个时限，`run` 到时不论是否完成都以退出码 0 结束进程。生命周期与健康回调抛出时，交给宿主的 `reason` 只是异常的简单类型名（如 `ValueError`），异常文本可能含路径或连接串，只写进 stderr。
+8. 调用与事件（invocation.md §1、§2、§4）：`Invoke` 依次核对会话令牌、操作是否声明（否则 `Unimplemented`）、是否可服务，再从元数据还原上下文：`trace_parent` 按 RFC-0003 的文法取，不合即没有父 Span；`trace_state` 不进上下文；Baggage 只留已登记的键（`xihan.principal` 原样交给作者）；`deadline` 按规范的严格文法读（`2026-11-18 03:25:00Z` 这类写法不算），读不出当作没有，生效的截止时间取它与 gRPC 截止时间中较早的一个。然后经 `Invoker` 与完整管道执行，`payload` 为空等同 `{}`。调用方取消或截止时间到了只触发信号，不取消处理器的任务（RFC-0003 规则 1）。本 SDK 不提供流式操作：`InvokeStream` 读第一帧，流在第一帧之前结束或第一帧不是 `start` 时为 `InvalidArgument`，是 `start` 时为 `Unimplemented`，不论操作是否声明、插件是否就绪。`HandleEvent` 依次核对：没有信封或 `mode` 不是空、`competing`、`broadcast` 为 `InvalidArgument`；按（主题，方式，类型）找订阅，一个也没有即 `KERNEL_NOTFOUND_001` + `plugins.event.unsubscribed`（`id`、`topic`、`type`、`mode`，空方式写 `competing`）；不可服务为 `PLUGINS_UNAVAILABLE_001`；之后匹配的订阅按声明顺序依次执行，第一个失败即投递结果，处理器抛出为 `KERNEL_UNEXPECTED_001` + `kernel.invocation.unhandled_exception`。
+9. 回调（invocation.md §5）：`host_of(ctx)` 取宿主客户端（运行时建的每个调用与投递的上下文里都有，别的上下文抛出 `FrameworkError`），`await host.invoke(ctx, "orders.create", payload)` 与 `await host.publish(ctx, envelopes)`（批量，逐项结果）。发出之前按宿主的顺序在本地核对，不合不发：所需权限既在清单 `permissions` 里、也在 `Configure` 授予的权限里，否则 `PLUGINS_DENIED_002` + `plugins.callback.denied`；上下文的 `xihan.tenant` 必须是插件正在处理的某个调用或投递的租户，否则 `plugins.callback.tenant_denied`；`publish` 的这两项都是整批的结果。信封的 `xihantenant` 不在本地核对，交给宿主逐项判定。请求带会话令牌，`metadata` 取自上下文：当前 Span 的 traceparent、UTC 七位小数加 `+00:00` 写法的 `deadline`（gRPC 截止时间与它相同）、已登记的 Baggage，`trace_state` 为空。gRPC 失败按规范的表映射：`Unauthenticated` 为 `plugins.callback.session_invalid`，`PermissionDenied` 为 `plugins.callback.denied`，`DeadlineExceeded` 为 `KERNEL_TIMEOUT_001`，调用方已取消的 `Cancelled` 为 `KERNEL_CANCELLED_001`，其余 `Cancelled`、`Unavailable` 与连接失败为 `plugins.host.unavailable`（`reason` 为 `<状态名>: <说明>`），`Host.invoke` 的 `Unimplemented` 与 `InvalidArgument` 为 `kernel.operation.unknown` 与 `kernel.operation.invalid_payload`，其他为 `plugins.process.failed`；`publish` 的 RPC 失败时每一项同一个错误，宿主返回的结果数与信封数不同时每一项都是 `plugins.process.failed`。宿主写来的 `Status` 按 invocation.md §3 读：错误码不合文法时整个错误换成 `plugins.process.failed`（`phase` 为 `invoke`），消息键不合文法的成为自由文本错误，`details` 不是 JSON 对象时没有细节。
+10. 错误、消息键与日志（invocation.md §3、§6、§8）：业务失败走 `Status.error`，gRPC 状态只表示传输失败。带消息键的错误写出时 `text` 留空，由宿主按目录翻译成调用方的语言；只有 `Error.literal` 的自由文本错误写 `text`；`details` 是参数的 JSON 对象文本，没有时为空，`inner` 照写。运行时与宿主共用的键是 `plugins.process.unavailable`、`plugins.process.failed`、`plugins.event.unsubscribed`、`plugins.host.unavailable`、`plugins.callback.denied`、`plugins.callback.tenant_denied` 与 `plugins.callback.session_invalid`，错误的 `details` 就是它们的参数。宿主有这些键的目录，SDK 不随握手发送它们；`plugin.CATALOG`（目录名 `plugins.protocol`，10 种区域，文案与参考实现相同）供本地渲染，运行时用它写 stderr 日志里的错误文案。`run` 与 `Plugin.run()` 在根日志没有处理器时接上 `JsonLogHandler`：stderr 一行一个 JSON 对象，`level` 为 `trace` / `debug` / `information` / `warning` / `error` / `critical`，另有 `message` 与其余作用域属性。
 
 用黑盒运行器验证（需要 Go，版本见 `spec/conformance/go.mod`）：
 
@@ -188,11 +194,11 @@ cd spec/conformance
 go run ./cmd/xihan-conformance plugin --dir <插件目录> --exclude echoes.crash --sample 'echoes.create={"text":"hi"}' --config '{"greeting":"hello"}'
 ```
 
-完整的示例在 `examples/echo`：操作、故意崩溃的 `echoes.crash`、事件订阅、健康项、配置与宿主回调。`tests/test_plugin_conformance.py` 把它放进临时目录、生成启动脚本，再用运行器跑全部 8 个用例。
+完整的示例在 `examples/echo`：操作、故意崩溃的 `echoes.crash`、事件订阅、健康项、类型化读取的配置与宿主回调。`tests/test_plugin_conformance.py` 把它放进临时目录、生成启动脚本，再用运行器跑全部 14 个用例；`tests/test_plugin_runtime.py` 以测试扮演宿主与假的 `Host` 服务走上面每一条，`tests/test_plugin_process.py` 以子进程核对进程入口的退出码与收尾时限。
 
 ## 与宿主共用的行为
 
-`Result`、`Error`、`Maybe` 的 JSON 编码按 RFC-0001「Result」：有值成功 `{"ok":true,"value":…}`，无值成功（`success()`）只写 `{"ok":true}`，失败 `{"ok":false,"error":{…}}`。读取分三种：`Result.from_json_value`（有值，`value` 必填且不能是 `null`）、`Result.unit_from_json_value`（无值，带了 `value` 即拒绝，`{}` 与 `null` 也算）、`Result.maybe_from_json_value`（值是 `Maybe`，`null` 即无值）；`Error` 的 `message` 必填且非空，可选成员写成 `null` 不合法，未知成员忽略；从文本读取时先过共同的 JSON 读取检查，任何一层出现重复的成员名即不合法，含 `value`、`details` 与 `inner` 的内部。数字按值模型往返：64 位范围内的整数原样（9007199254740993 不会变成 9007199254740992），整数值的浮点写成 `2.0`、`-0.0`、`1E+17`，读回来仍是浮点；非有限的浮点写成字符串 `NaN`、`Infinity`、`-Infinity`。这些规则与生命周期迁移表、管道阶段顺序、错误码、Baggage 键与能力依赖的文法都由 `spec/conformance/vectors` 验证。插件协议的握手行文法与版本协商由 `spec/conformance/vectors/plugin/` 验证；握手、会话令牌、生命周期、未知操作、声明的操作、事件投递与 stdin 关闭即退出由规范仓库的黑盒运行器验证（见[写一个插件](#写一个插件)）。
+`Result`、`Error`、`Maybe` 的 JSON 编码按 RFC-0001「Result」：有值成功 `{"ok":true,"value":…}`，无值成功（`success()`）只写 `{"ok":true}`，失败 `{"ok":false,"error":{…}}`。读取分三种：`Result.from_json_value`（有值，`value` 必填且不能是 `null`）、`Result.unit_from_json_value`（无值，带了 `value` 即拒绝，`{}` 与 `null` 也算）、`Result.maybe_from_json_value`（值是 `Maybe`，`null` 即无值）；`Error` 的 `message` 必填且非空，可选成员写成 `null` 不合法，未知成员忽略；从文本读取时先过共同的 JSON 读取检查，任何一层出现重复的成员名即不合法，含 `value`、`details` 与 `inner` 的内部。数字按值模型往返：64 位范围内的整数原样（9007199254740993 不会变成 9007199254740992），整数值的浮点写成 `2.0`、`-0.0`、`1E+17`，读回来仍是浮点；非有限的浮点写成字符串 `NaN`、`Infinity`、`-Infinity`。这些规则与生命周期迁移表、管道阶段顺序、错误码、Baggage 键与能力依赖的文法都由 `spec/conformance/vectors` 验证。插件协议的握手行、版本协商、回调端点列表、截止时间、回调失败的映射与运行时的消息键由 `spec/conformance/vectors/plugin/` 验证；握手、会话令牌、调用次序、生命周期、未知操作、声明的操作、未就绪时的调用与投递、事件投递、找不到订阅、流式调用的第一帧、配置节不是对象、启动之前的停止与 stdin 关闭即退出由规范仓库的黑盒运行器验证（见[写一个插件](#写一个插件)）。
 
 ## 语言映射
 

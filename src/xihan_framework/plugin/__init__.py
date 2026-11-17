@@ -1,7 +1,8 @@
 """进程外插件运行时（RFC-0017，``spec/plugin/``）：协议 ``xihan.plugin.v1`` 的插件一侧。
 
-读宿主下发的环境变量、在本机端点上以 gRPC 提供 ``Plugin`` 服务、向 stdout 写握手行、维护生命周期状态机与健康推送、
-把调用交给 SDK 的调用器经完整管道执行、把投递交给订阅的处理器，并以 ``Host`` 客户端回调宿主；stdin 关闭即退出。
+读宿主下发的环境变量、在本机端点上以 gRPC 提供 ``Plugin`` 服务、向 stdout 写握手行、按 lifecycle.md §7 维护生命周期
+状态机与健康推送、把调用交给 SDK 的调用器经完整管道执行、把投递交给订阅的处理器，并以 ``Host`` 客户端回调宿主（端点取
+``XIHAN_PLUGIN_HOST_ADDRESS`` 里第一个 grpcio 能连的项）；stdin 关闭或 SIGTERM 即收尾，最多 3 秒后退出。
 协议代码在 ``xihan_framework.plugin.v1``，由 ``spec/plugin/plugin.proto`` 生成。
 
 需要可选依赖 ``grpcio`` 与 ``protobuf``：``pip install "xihan-framework[plugin]"``；核心五块不依赖它们。
@@ -39,7 +40,9 @@ from xihan_framework.plugin._messages import (  # noqa: E402
     LOCALES,
     MESSAGE_CALLBACK_DENIED,
     MESSAGE_CALLBACK_TENANT_DENIED,
+    MESSAGE_EVENT_UNSUBSCRIBED,
     MESSAGE_FAILED,
+    MESSAGE_HOST_UNAVAILABLE,
     MESSAGE_SESSION_INVALID,
     MESSAGE_UNAVAILABLE,
     load_catalog,
@@ -59,6 +62,7 @@ from xihan_framework.plugin._model import (  # noqa: E402
     is_topic,
 )
 from xihan_framework.plugin._protocol import (  # noqa: E402
+    DIALABLE_NETWORKS,
     ENV_HOST_ADDRESS,
     ENV_INSTANCE,
     ENV_LOCALE,
@@ -73,15 +77,19 @@ from xihan_framework.plugin._protocol import (  # noqa: E402
     Endpoint,
     Network,
     is_loopback_address,
+    is_whitespace,
     negotiate_version,
     parse_endpoint,
     parse_handshake_line,
+    parse_host_addresses,
+    select_host_endpoint,
 )
-from xihan_framework.plugin._runtime import Plugin  # noqa: E402
+from xihan_framework.plugin._runtime import Plugin, run  # noqa: E402
 
 __all__ = [
     "CATALOG",
     "CATALOG_NAME",
+    "DIALABLE_NETWORKS",
     "ENV_HOST_ADDRESS",
     "ENV_INSTANCE",
     "ENV_LOCALE",
@@ -97,7 +105,9 @@ __all__ = [
     "LOCALES",
     "MESSAGE_CALLBACK_DENIED",
     "MESSAGE_CALLBACK_TENANT_DENIED",
+    "MESSAGE_EVENT_UNSUBSCRIBED",
     "MESSAGE_FAILED",
+    "MESSAGE_HOST_UNAVAILABLE",
     "MESSAGE_SESSION_INVALID",
     "MESSAGE_UNAVAILABLE",
     "PERMISSION_INVOKE",
@@ -126,9 +136,13 @@ __all__ = [
     "host_of",
     "is_loopback_address",
     "is_topic",
+    "is_whitespace",
     "level_name",
     "load_catalog",
     "negotiate_version",
     "parse_endpoint",
     "parse_handshake_line",
+    "parse_host_addresses",
+    "run",
+    "select_host_endpoint",
 ]

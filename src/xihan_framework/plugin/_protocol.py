@@ -1,7 +1,6 @@
-"""协议常量、端点与握手行（``spec/plugin/handshake.md``）。"""
+"""协议常量、端点、握手行与宿主回调端点列表（``spec/plugin/handshake.md``）。"""
 
-import re
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
@@ -24,18 +23,35 @@ ENV_PROTOCOL_VERSIONS: Final = "XIHAN_PLUGIN_PROTOCOL_VERSIONS"
 ENV_PRIMITIVES: Final = "XIHAN_PLUGIN_PRIMITIVES"
 #: 本次启动的会话令牌。
 ENV_SESSION: Final = "XIHAN_PLUGIN_SESSION"
-#: 宿主回调端点 ``<network> <address>``。
+#: 宿主回调端点：一个或多个 ``<network> <address>``，按宿主的偏好排序、以 ``;`` 分隔（handshake.md §4）。
 ENV_HOST_ADDRESS: Final = "XIHAN_PLUGIN_HOST_ADDRESS"
 #: 实例 ID。
 ENV_INSTANCE: Final = "XIHAN_PLUGIN_INSTANCE"
 #: 宿主默认区域（BCP 47）。
 ENV_LOCALE: Final = "XIHAN_PLUGIN_LOCALE"
 
-# 握手行文法 ^xihan-plugin/1 (unix|tcp|npipe) (\S+)$；ASCII 模式让 \S 只排除 ASCII 空白，与一致性运行器的 RE2 相同
-_HANDSHAKE_LINE = re.compile(r"xihan-plugin/1 (unix|tcp|npipe) (\S+)", re.ASCII)
-_ENDPOINT = re.compile(r"(unix|tcp|npipe) (\S+)", re.ASCII)
-# tcp 只接受字面的回环地址 127.0.0.1 与 [::1]，主机名（含 localhost）不算（handshake.md §2）
-_LOOPBACK = re.compile(r"(?:127\.0\.0\.1|\[::1\]):[0-9]+")
+# 握手行与端点里的空白（handshake.md §2，ADR-0237）：与 .NET 正则的 \s 相同。str.isspace 另把 U+001C–U+001F 算作空白，
+# re 的 \s 也随之不同，所以按码点逐个列出
+_WHITESPACE: Final = frozenset(
+    map(
+        chr,
+        (
+            *range(0x09, 0x0E),
+            0x20,
+            0x85,
+            0xA0,
+            0x1680,
+            *range(0x2000, 0x200B),
+            0x2028,
+            0x2029,
+            0x202F,
+            0x205F,
+            0x3000,
+        ),
+    )
+)
+# 握手行的前缀含其后的一个空格；之后的部分与宿主回调端点的一项同一文法
+_HANDSHAKE_LINE_PREFIX: Final = HANDSHAKE_LINE_VERSION + " "
 
 
 class Network(StrEnum):
@@ -46,6 +62,12 @@ class Network(StrEnum):
     NPIPE = "npipe"
 
 
+#: grpcio 能拨号的网络类型：它不支持 Windows 命名管道，插件按顺序取宿主回调端点里第一个这些类型的项（handshake.md §4）。
+DIALABLE_NETWORKS: Final = frozenset({Network.UNIX, Network.TCP})
+
+_NETWORKS: Final = frozenset(network.value for network in Network)
+
+
 @dataclass(frozen=True, slots=True)
 class Endpoint:
     """一个本机 gRPC 端点：网络类型与地址（套接字路径、``host:port`` 或管道名）。"""
@@ -54,7 +76,7 @@ class Endpoint:
     address: str
 
     def __str__(self) -> str:
-        """``<network> <address>``，即环境变量 ``XIHAN_PLUGIN_HOST_ADDRESS`` 的格式。"""
+        """``<network> <address>``，即 ``XIHAN_PLUGIN_HOST_ADDRESS`` 里一项的写法。"""
         return f"{self.network} {self.address}"
 
     @property
@@ -72,21 +94,85 @@ class Endpoint:
         return None
 
 
+def is_whitespace(character: str) -> bool:
+    """判断一个字符是不是握手行与回调端点所说的空白（handshake.md §2）。
+
+    集合是 U+0009–U+000D、U+0020、U+0085、U+00A0、U+1680、U+2000–U+200A、U+2028、U+2029、U+202F、U+205F、U+3000；
+    U+200B 等其他字符不算，可以出现在地址里。
+    """
+    return character in _WHITESPACE
+
+
+def has_whitespace(text: str) -> bool:
+    """文本里是否有 ``is_whitespace`` 所说的空白；SDK 自己生成的端点地址不能有（handshake.md §2）。"""
+    return any(character in _WHITESPACE for character in text)
+
+
 def is_loopback_address(address: str) -> bool:
-    """判断 ``host:port`` 是否是回环地址 ``127.0.0.1`` 或 ``[::1]`` 加端口。"""
-    return _LOOPBACK.fullmatch(address) is not None
+    """判断 ``tcp`` 端点的地址是不是回环地址加端口（handshake.md §2）。
 
-
-def parse_handshake_line(line: str) -> Endpoint | None:
-    """按 ``^xihan-plugin/1 (unix|tcp|npipe) (\\S+)$`` 解析握手行；不合文法或 tcp 不是回环地址时为 ``None``。"""
-    match = _HANDSHAKE_LINE.fullmatch(line)
-    return None if match is None else _endpoint(match)
+    IPv4 是 ``127.0.0.0/8`` 的点分十进制，四段、每段 0–255、不带前导零；IPv6 只认 ``[::1]``；端口是 1–65535 的十进制，
+    不带正负号与前导零。主机名（含 ``localhost``）不算。
+    """
+    host, separator, port = address.rpartition(":")
+    if not separator or not _decimal(port, 65535):
+        return False
+    if host == "[::1]":
+        return True
+    # 只认四段写法：127.1、0177.0.0.1、2130706433、0x7f.0.0.1 这些操作系统也接受的写法一律不合法
+    segments = host.split(".")
+    return (
+        len(segments) == 4
+        and segments[0] == "127"
+        and all(_decimal(segment, 255) is not None for segment in segments[1:])
+    )
 
 
 def parse_endpoint(text: str) -> Endpoint | None:
-    """解析 ``<network> <address>``（``XIHAN_PLUGIN_HOST_ADDRESS``）；规则与握手行的端点部分相同。"""
-    match = _ENDPOINT.fullmatch(text)
-    return None if match is None else _endpoint(match)
+    """解析 ``<network> <address>``；不合文法时为 ``None``（handshake.md §2）。
+
+    ``network`` 是 ``unix``、``tcp`` 或 ``npipe``，与地址之间恰好一个空格；地址是一个或多个 ``is_whitespace`` 之外的字符
+    （含非 ASCII 字母与 ``;``），``tcp`` 的地址另须通过 ``is_loopback_address``。
+    """
+    network, separator, address = text.partition(" ")
+    if not separator or network not in _NETWORKS or not address or has_whitespace(address):
+        return None
+    if network == Network.TCP and not is_loopback_address(address):
+        return None
+    return Endpoint(Network(network), address)
+
+
+def parse_handshake_line(line: str) -> Endpoint | None:
+    """按 ``^xihan-plugin/1 (unix|tcp|npipe) (<地址>)\\z`` 解析去掉行尾之后的握手行；不合文法时为 ``None``。"""
+    if not line.startswith(_HANDSHAKE_LINE_PREFIX):
+        return None
+    return parse_endpoint(line[len(_HANDSHAKE_LINE_PREFIX) :])
+
+
+def parse_host_addresses(value: str) -> tuple[Endpoint, ...] | None:
+    """解析 ``XIHAN_PLUGIN_HOST_ADDRESS``（handshake.md §4）：一个或多个以 ``;`` 分隔的端点，每项同 ``parse_endpoint``。
+
+    任何一项不合法整个值就不合法，返回 ``None``；空串，以及开头、结尾或连续的 ``;`` 留下的空项都不合法。
+    """
+    endpoints: list[Endpoint] = []
+    # 按 ; 切开后地址里自然没有 ;
+    for part in value.split(";"):
+        endpoint = parse_endpoint(part)
+        if endpoint is None:
+            return None
+        endpoints.append(endpoint)
+    return tuple(endpoints)
+
+
+def select_host_endpoint(value: str | None, supported: Collection[Network] = DIALABLE_NETWORKS) -> Endpoint | None:
+    """按 handshake.md §4 选回调端点：值合法时按顺序取第一个 ``network`` 在 ``supported`` 里的项，之后不换。
+
+    变量缺失（``None``）、不合法或没有可用的项时为 ``None``：插件照常服务，回调以 ``plugins.host.unavailable`` 失败。
+    """
+    endpoints = None if value is None else parse_host_addresses(value)
+    if endpoints is None:
+        return None
+    return next((endpoint for endpoint in endpoints if endpoint.network in supported), None)
 
 
 def negotiate_version(host: Iterable[int], plugin: Iterable[int] = SUPPORTED_PROTOCOL_VERSIONS) -> int | None:
@@ -96,9 +182,13 @@ def negotiate_version(host: Iterable[int], plugin: Iterable[int] = SUPPORTED_PRO
     return max(common) if common else None
 
 
-def _endpoint(match: re.Match[str]) -> Endpoint | None:
-    """由文法匹配结果组装端点，tcp 再核对回环地址。"""
-    endpoint = Endpoint(Network(match.group(1)), match.group(2))
-    if endpoint.network is Network.TCP and not is_loopback_address(endpoint.address):
+def _decimal(text: str, limit: int) -> int | None:
+    """读不带正负号与前导零的 ASCII 十进制数（``0`` 本身可以）；不合写法或超过 ``limit`` 时为 ``None``。"""
+    # 先按位数挡掉过长的数字，再看前导零
+    if not text or len(text) > len(str(limit)) or (len(text) > 1 and text[0] == "0"):
         return None
-    return endpoint
+    # str.isdigit 认全角与上标数字，这里只认 ASCII
+    if not all("0" <= character <= "9" for character in text):
+        return None
+    value = int(text)
+    return value if value <= limit else None

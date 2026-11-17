@@ -1,13 +1,15 @@
 """回声插件：用 ``xihan_framework.plugin`` 写的进程外插件，也是黑盒运行器的被测插件。
 
-- ``echoes.create``：回声文本，附上配置节 ``XiHan:Echo`` 的问候语与上下文里的租户、主体、关联 ID；文本为空是业务失败，
-  宿主用握手时拿到的消息目录 ``echo`` 翻译它。
-- ``echoes.relay``：经宿主回调（``Host.Invoke``，权限 ``capability:kernel.pipeline``）调用另一个操作，返回宿主的应答。
+- ``echoes.create``：回声文本，附上配置节 ``XiHan:Echo`` 的问候语（类型化读取 ``Configuration.decode``）与上下文里的
+  租户、主体、关联 ID；文本为空是业务失败，宿主用握手时拿到的消息目录 ``echo`` 翻译它。
+- ``echoes.relay``：经宿主回调（``Host.Invoke``，权限 ``capability:kernel.pipeline``）调用另一个操作，返回宿主的应答；
+  回调失败（如宿主没有可用的回调端点时的 ``plugins.host.unavailable``）原样作为结果。
 - ``echoes.crash``：故意让进程异常退出而不应答，宿主应记为崩溃并按退避重启；跑黑盒用例时用 ``--exclude`` 排除。
 - ``events.list``：列出收到的事件 ID（最多保留最近 1000 个）。
 - 订阅 ``echo.events``（竞争消费），健康项 ``echo``。
 
-运行：宿主按清单的 ``entry`` 启动插件目录里的启动脚本，脚本以绝对路径的解释器执行本文件（见 README「写一个插件」）。
+运行：宿主按清单的 ``entry`` 启动插件目录里的启动脚本，脚本以绝对路径的解释器执行本文件（见 README「写一个插件」）；
+入口是 ``run(build)``，构造时的配置错误也记进 stderr 的 JSON 日志。
 """
 
 import json
@@ -32,8 +34,9 @@ from xihan_framework.plugin import (
     SubscriptionHandler,
     host_of,
     load_catalog,
+    run,
 )
-from xihan_framework.primitives import Error, JsonValue, Result, Stability, Unit, fail, ok, success
+from xihan_framework.primitives import Error, FrameworkError, JsonValue, Result, Stability, Unit, fail, ok, success
 
 #: 插件目录：清单、消息目录与本文件放在一起。
 DIRECTORY = Path(__file__).resolve().parent
@@ -47,11 +50,15 @@ MESSAGE_CONFIGURATION_INVALID = "echo.configuration.invalid"
 #: 转发没有给操作 ID。
 ERROR_CODE_OPERATION_MISSING = "ECHO_VALIDATION_003"
 MESSAGE_OPERATION_MISSING = "echo.relay.operation_missing"
-#: 宿主没有回调端点。
-ERROR_CODE_HOST_UNAVAILABLE = "ECHO_UNAVAILABLE_001"
-MESSAGE_HOST_UNAVAILABLE = "echo.host.unavailable"
 
 _logger = logging.getLogger("echo")
+
+
+@dataclass(frozen=True)
+class Settings:
+    """配置节 ``XiHan:Echo``：成员名不区分大小写（宿主写出的是 ``IConfiguration`` 的键）。"""
+
+    greeting: str | None = None
 
 
 @dataclass(frozen=True)
@@ -108,17 +115,16 @@ class Echo:
         self.events: deque[str] = deque(maxlen=1000)
 
     async def configure(self, configuration: Configuration) -> Result[Unit]:
-        """读配置节 ``XiHan:Echo`` 的 ``greeting``。"""
-        greeting = configuration.section.get("greeting")
-        if greeting is not None and not isinstance(greeting, str):
+        """读配置节 ``XiHan:Echo`` 的 ``greeting``；读不出是业务失败，宿主按目录翻译。"""
+        try:
+            settings = configuration.decode(Settings)
+        except FrameworkError as error:
             return fail(
                 Error.validation(
-                    ERROR_CODE_CONFIGURATION_INVALID,
-                    MESSAGE_CONFIGURATION_INVALID,
-                    {"reason": "greeting must be a string"},
+                    ERROR_CODE_CONFIGURATION_INVALID, MESSAGE_CONFIGURATION_INVALID, {"reason": error.message}
                 )
             )
-        self.greeting = greeting
+        self.greeting = settings.greeting
         return success()
 
     def health(self) -> Health:
@@ -140,15 +146,12 @@ class Echo:
         )
 
     async def relay(self, ctx: Context, request: RelayRequest) -> Result[RelayResponse]:
-        """经宿主回调调用另一个操作；宿主没有回调端点或回调失败时返回失败。"""
+        """经宿主回调调用另一个操作；回调失败时把错误原样作为结果。"""
         if not request.operation:
             return fail(Error.validation(ERROR_CODE_OPERATION_MISSING, MESSAGE_OPERATION_MISSING))
-        host = host_of(ctx)
-        if host is None:
-            return fail(Error.unavailable(ERROR_CODE_HOST_UNAVAILABLE, MESSAGE_HOST_UNAVAILABLE))
         # 例子用标准库 json 转发任意 JSON；None 即空载荷，宿主按 {} 处理
         payload = b"" if request.payload is None else json.dumps(request.payload).encode("utf-8")
-        response = await host.invoke(ctx, request.operation, payload)
+        response = await host_of(ctx).invoke(ctx, request.operation, payload)
         if response.outcome.error is not None:
             return fail(response.outcome.error)
         return ok(RelayResponse(json.loads(response.payload) if response.payload else {}))
@@ -219,4 +222,4 @@ def build() -> Plugin:
 
 
 if __name__ == "__main__":
-    sys.exit(build().run())
+    sys.exit(run(build))

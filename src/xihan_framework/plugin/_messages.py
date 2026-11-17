@@ -1,4 +1,4 @@
-"""插件运行时的错误码、消息键与消息目录（RFC-0017「错误码」、RFC-0010）。"""
+"""插件运行时的错误码、消息键与消息目录（RFC-0017「错误码」、invocation.md §8、RFC-0010）。"""
 
 import os
 from importlib.resources import files
@@ -9,25 +9,30 @@ from typing import Final
 from xihan_framework._json import JsonTextError, parse
 from xihan_framework.primitives import DEFAULT_LOCALE, ERROR_CODE_INVALID_ARGUMENT, Catalog, FrameworkError
 
-#: 插件未就绪、正在停止或不可达；回调时宿主不可达。
+#: 插件不在可服务状态；回调时连不上宿主或没有可用的回调端点。
 ERROR_CODE_UNAVAILABLE: Final = "PLUGINS_UNAVAILABLE_001"
 #: 回调被拒：会话令牌无效、权限未声明或未授予、租户不是宿主随调用交给插件的租户。
 ERROR_CODE_CALLBACK_DENIED: Final = "PLUGINS_DENIED_002"
-#: 配置、启动、停止或回调时发生未预期的失败。
+#: 生命周期或健康回调抛出、配置节不是 JSON 对象、宿主写来的错误不合法、回调的 gRPC 状态没有对应的错误。
 ERROR_CODE_UNEXPECTED: Final = "PLUGINS_UNEXPECTED_001"
 
-#: 插件不可用的消息键（参数 ``id``、``state``）。
+# 运行时与宿主共用的消息键（invocation.md §8，向量 plugin/plugin-messages.json）；错误的 details 就是这些参数，不另加成员
+#: 插件不在可服务状态的消息键（参数 ``id``、``state``，``state`` 是状态名），码 ``PLUGINS_UNAVAILABLE_001``。
 MESSAGE_UNAVAILABLE: Final = "plugins.process.unavailable"
-#: 某一步失败的消息键（参数 ``id``、``phase``、``reason``）。
+#: 插件一侧失败的消息键（参数 ``id``、``phase``、``reason``，``phase`` 小写），码 ``PLUGINS_UNEXPECTED_001``。
 MESSAGE_FAILED: Final = "plugins.process.failed"
-#: 回调需要的权限未在清单声明或未被授予的消息键（参数 ``id``、``permission``）。
+#: 投递找不到订阅的消息键（参数 ``id``、``topic``、``type``、``mode``），码 ``KERNEL_NOTFOUND_001``。
+MESSAGE_EVENT_UNSUBSCRIBED: Final = "plugins.event.unsubscribed"
+#: 回调连不上宿主或没有可用回调端点的消息键（参数 ``id``、``reason``），码 ``PLUGINS_UNAVAILABLE_001``。
+MESSAGE_HOST_UNAVAILABLE: Final = "plugins.host.unavailable"
+#: 回调所需的权限未在清单声明或未被授予的消息键（参数 ``id``、``permission``），码 ``PLUGINS_DENIED_002``。
 MESSAGE_CALLBACK_DENIED: Final = "plugins.callback.denied"
-#: 回调或发布带的租户不是宿主随调用交给插件的租户的消息键（参数 ``id``、``tenant``）。
+#: 回调带的租户不是宿主随调用交给插件的租户的消息键（参数 ``id``、``tenant``），码 ``PLUGINS_DENIED_002``。
 MESSAGE_CALLBACK_TENANT_DENIED: Final = "plugins.callback.tenant_denied"
-#: 回调的会话令牌缺失或无效的消息键（没有参数）。
+#: 宿主拒绝了回调的会话令牌的消息键（没有参数），码 ``PLUGINS_DENIED_002``。
 MESSAGE_SESSION_INVALID: Final = "plugins.callback.session_invalid"
 
-#: 运行时消息目录的名字；与宿主为同一组键登记的目录同名，宿主已有同名目录时用它自己的。
+#: 运行时消息目录的名字（与宿主为同一组键登记的目录同名）；它不随握手发送，作者的目录不能用这个名字。
 CATALOG_NAME: Final = "plugins.protocol"
 #: 内置的 10 种区域（RFC-0010），``en-US`` 是默认区域。
 LOCALES: Final = ("en-US", "zh-CN", "zh-TW", "ja-JP", "ko-KR", "de-DE", "es-ES", "fr-FR", "pt-BR", "ru-RU")
@@ -61,6 +66,6 @@ def _invalid(message: str) -> FrameworkError:
     return FrameworkError(ERROR_CODE_INVALID_ARGUMENT, message)
 
 
-#: 运行时自己的消息目录（10 种区域）：错误的 ``text`` 在进程默认的解析器解析不了时用它的 ``en-US``；
-#: 宿主按消息键用自己的目录翻译，要随握手交给宿主时把它放进 ``Plugin`` 的 ``catalogs``。
+#: 运行时自己的消息目录（参考实现的 10 种区域），供本地渲染（如写日志）。宿主有同样的目录，按消息键把错误翻译成
+#: 调用方的语言，所以它不随握手发送（handshake.md §3 第 6 条、invocation.md §8）。
 CATALOG: Final = load_catalog(files("xihan_framework.plugin") / "Localization")

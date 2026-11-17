@@ -1,6 +1,5 @@
 {
   "echo.configuration.invalid": "The configuration section XiHan:Echo is not valid: {reason}",
-  "echo.host.unavailable": "The host has no callback endpoint.",
   "echo.relay.operation_missing": "The relay needs the ID of the operation to invoke.",
   "echo.text.missing": "The text to echo must not be empty."
 }
