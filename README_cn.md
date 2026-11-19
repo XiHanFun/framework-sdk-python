@@ -224,7 +224,7 @@ python -m pip install -e ".[plugin]" --group dev
 ruff check && ruff format --check && mypy && pytest
 ```
 
-`--group` 需要 pip 25.1 以上。测试直接读取 `spec/conformance/vectors/` 下的向量，子模块没有检出时测试失败而不是跳过。一致性测试 `tests/test_plugin_conformance.py` 用 `go run` 运行子模块里的黑盒运行器，需要 Go（版本见 `spec/conformance/go.mod`）；没有 Go 时失败并给出原因，确实要跳过时设置 `XIHAN_CONFORMANCE_REQUIRED=0`。`tests/test_vectors.py` 核对 `spec/conformance/vectors/` 下的每个向量文件要么有测试回放、要么列为豁免并写明理由；规范新增向量文件时这个测试失败，要么回放它，要么写进豁免并给出理由。
+`--group` 需要 pip 25.1 以上。测试直接读取 `spec/conformance/vectors/` 下的向量，子模块没有检出时测试失败而不是跳过。一致性测试 `tests/test_plugin_conformance.py` 用 `go run` 运行子模块里的黑盒运行器，需要 Go（版本见 `spec/conformance/go.mod`）；没有 Go 时失败并给出原因，确实要跳过时设置 `XIHAN_CONFORMANCE_REQUIRED=0`。`tests/test_vectors.py` 按档表 `spec/conformance/profiles.json` 核对认领的一致性档（RFC-0024）：认领的档要求的每个向量要么有测试回放、要么列为缺口并写明理由；规范在认领的档里新增向量时这个测试失败，要么回放它，要么列为缺口并给出理由。
 
 协议代码 `src/xihan_framework/plugin/v1/`（消息、服务与 mypy-protobuf 生成的类型存根）由 `spec/plugin/plugin.proto` 生成并提交，改协议后重新生成：
 
@@ -237,6 +237,14 @@ python scripts/generate_protocol.py
 ## 状态
 
 `0.1.0`（未发布）：`primitives`、`manifest`、`invocation`、`pipeline`、`operation` 与进程外插件运行时 `plugin`（`xihan.plugin.v1`，基于 `grpc.aio`，以 extra `xihan-framework[plugin]` 引入 grpcio 与 protobuf）可用，示例插件 echo 通过规范黑盒运行器的全部用例。远程 Provider 的操作集（如 `caching.distributed@1`）仍未提供；Wasm 载体不在本 SDK 范围。
+
+一致性（RFC-0024）：
+
+- 钉的规范版本：提交 `386501f`（`spec/` 子模块）；规范还没有打标签，首个标签计划为 `v1.0.0-rc.1`。
+- 认领的档：`core` 与 `plugin`。
+- 缺口：无。
+
+在有钉在规范标签上的发布版之前，成熟度是 Experimental。
 
 ## 生态
 
