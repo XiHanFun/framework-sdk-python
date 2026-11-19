@@ -39,6 +39,7 @@ framework-sdk-python 是 [XiHan Spec](https://github.com/XiHanFun/framework-spec
 ├─ .claude/skills -> ../.agents/skills    # Claude Code 技能兼容入口
 ├─ CLAUDE.md -> AGENTS.md                 # Claude Code 仓库指令入口
 ├─ .github/workflows/ci.yml               # 门禁：生成代码一致、ruff、mypy、pytest（Linux 与 Windows）、分发包内容
+├─ .github/workflows/release.yml          # 发布：推送 v* 标签触发，核对后发布到 PyPI
 ├─ pyproject.toml                         # 包元数据、extra plugin、开发依赖组、ruff / mypy / pytest 配置
 ├─ README.md / README_cn.md               # 概览，两份同步；README.md 也是 PyPI 上的项目说明
 ├─ spec/                                  # 规范（XiHanFun/framework-spec 的 submodule）：RFC、术语、插件协议、一致性向量与黑盒运行器
@@ -55,7 +56,9 @@ framework-sdk-python 是 [XiHan Spec](https://github.com/XiHanFun/framework-spec
 │     └─ v1/                              # 由 spec/plugin/plugin.proto 生成的协议代码与类型存根，提交进仓库
 ├─ tests/                                 # pytest：单元、向量回放、插件运行时、进程入口与黑盒一致性
 ├─ examples/echo/                         # 示例插件，也是黑盒运行器的被测插件
-└─ scripts/generate_protocol.py           # 重新生成协议代码
+└─ scripts/
+   ├─ generate_protocol.py                # 重新生成协议代码
+   └─ release-check.sh                    # 发版核对：打标签之前与 release.yml 的 guard 都跑它
 ```
 
 ## 常用命令
@@ -76,6 +79,7 @@ framework-sdk-python 是 [XiHan Spec](https://github.com/XiHanFun/framework-spec
 | 全部门禁 | `ruff check && ruff format --check && mypy && pytest` |
 | 黑盒运行器 | `cd spec/conformance && go run ./cmd/xihan-conformance plugin --dir <插件目录> --exclude echoes.crash --sample 'echoes.create={"text":"hi"}' --config '{"greeting":"hello"}'` |
 | 构建分发包 | `python -m build`（需要 `build`：`python -m pip install build`） |
+| 发版核对 | `bash scripts/release-check.sh vX.Y.Z main`（打标签之前跑，联网取 `origin/main` 与规范的远端标签） |
 
 `.github/workflows/ci.yml` 是门禁命令的事实源；分发包内容的核对见 `.agents/skills/testing-release/references/gates.md`。
 
@@ -128,14 +132,16 @@ framework-sdk-python 是 [XiHan Spec](https://github.com/XiHanFun/framework-spec
 
 - 版本真源是 `src/xihan_framework/__init__.py` 的 `__version__`：hatchling 构建时从这里读（`[tool.hatch.version]`），`primitives.SDK_VERSION` 与握手里的 SDK 版本也取它，`tests/test_package.py` 核对它与分发元数据一致。
 - PyPI 包名 `xihan-framework`，导入名 `xihan_framework`；PyPI 上目前只有占名用的版本，首个版本尚未发布。
-- 仓库没有发布工作流；上传 PyPI 要用用户自己的凭据，只在用户明确要求时由用户执行。
-- 仓库还没有标签。按 RFC-0024「实现钉规范」，发预发布或正式版时 `spec/` 子模块必须正好在某个规范标签上，正式版只能钉规范的正式版标签。
+- 发布由 `.github/workflows/release.yml` 在推送 `v*` 标签时执行：guard 跑 `scripts/release-check.sh`（标签在 `main` 上、标签换成 PEP 440 后等于 `__version__`、规范钉在标签上），通过后构建并以 PyPI 可信发布（OIDC）上传；GitHub Release 与 XiHan.Framework 一样在标签推送后手动建。打标签之前先在本地跑同一份脚本；打标签与推送只在用户明确要求时执行，步骤见 `version-release` 技能。首次发布前要用户在 pypi.org 配可信发布者。
+- `__version__` 按 PEP 440 的规范写法（预发布如 `0.1.0rc1`），标签按语义化版本（`v0.1.0-rc.1`），预发布只能用 `-alpha.N`、`-beta.N`、`-rc.N`。
+- 还没有打过标签。按 RFC-0024「实现钉规范」，发预发布或正式版时 `spec/` 子模块必须正好在某个规范标签上，正式版只能钉规范的正式版标签。
 
 ## 分支
 
 - 日常改动直接提交到 `dev`。
 - `main` 只在用户明确说「推送并快进 main」时由 `dev` 快进（`git fetch . dev:main`，不是快进就停下查）。
 - CI（`.github/workflows/ci.yml`）在 `main` 与 `dev` 的 push、指向 `main` 与 `dev` 的 Pull Request 上运行，也可手动触发（`workflow_dispatch`）；同一引用上的新运行会取消旧运行。
+- 发版工作流（`.github/workflows/release.yml`）只在推送 `v*` 标签、或手动运行时选中版本标签时运行，见「发布」与 `version-release` 技能。
 
 ## Git 与提交
 
