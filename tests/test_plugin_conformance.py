@@ -1,7 +1,7 @@
 """黑盒一致性：把示例插件 echo 放进临时目录，用规范仓库的运行器跑全部用例（``spec/plugin/invocation.md`` §7）。
 
-运行器在子模块的 ``spec/conformance`` 里以 ``go run`` 运行，版本与锁定的规范一致；没有 Go 时跳过并给出原因，设置了
-``XIHAN_CONFORMANCE_REQUIRED`` 时（CI）改为失败。
+运行器在子模块的 ``spec/conformance`` 里以 ``go run`` 运行，版本与锁定的规范一致；没有 Go 时失败并给出原因，确实要跳过时
+设置 ``XIHAN_CONFORMANCE_REQUIRED=0``。
 宿主只继承 handshake.md §1 列出的环境变量，所以启动脚本里写解释器与插件脚本的绝对路径，不依赖 ``VIRTUAL_ENV``。
 """
 
@@ -58,10 +58,10 @@ def test_the_echo_plugin_passes_every_black_box_case(tmp_path: Path) -> None:
     go = shutil.which("go")
     if go is None:
         reason = "Go is not installed: the black-box runner of the spec (spec/conformance) is a Go program."
-        # CI 装了 Go 并设置 XIHAN_CONFORMANCE_REQUIRED，那里跳过即失败，免得一致性测试悄悄不跑
-        if os.environ.get("XIHAN_CONFORMANCE_REQUIRED"):
-            pytest.fail(reason)
-        pytest.skip(reason)
+        # 默认没有 Go 即失败，免得一致性测试悄悄不跑；只有显式设 XIHAN_CONFORMANCE_REQUIRED=0 才跳过
+        if os.environ.get("XIHAN_CONFORMANCE_REQUIRED") == "0":
+            pytest.skip(reason)
+        pytest.fail(f"{reason} Install Go, or set XIHAN_CONFORMANCE_REQUIRED=0 to skip this test.")
     directory = tmp_path / "echo"
     shutil.copytree(EXAMPLE, directory, ignore=shutil.ignore_patterns("__pycache__"))
     manifest_path = directory / "xihan.manifest.json"

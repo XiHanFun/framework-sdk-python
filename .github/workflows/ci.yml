@@ -4,9 +4,9 @@ name: CI
 # 一致性向量，并用规范仓库的黑盒运行器跑示例插件 echo），以及分发包的内容。
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   workflow_dispatch:
 
 permissions:
@@ -66,9 +66,6 @@ jobs:
         run: mypy
 
       - name: 测试
-        # 一致性测试没有 Go 时本该跳过；CI 里装了 Go，跳过即失败
-        env:
-          XIHAN_CONFORMANCE_REQUIRED: "1"
         run: pytest
 
   package:

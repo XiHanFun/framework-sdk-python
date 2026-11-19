@@ -224,7 +224,7 @@ python -m pip install -e ".[plugin]" --group dev
 ruff check && ruff format --check && mypy && pytest
 ```
 
-`--group` 需要 pip 25.1 以上。测试直接读取 `spec/conformance/vectors/` 下的向量，子模块没有检出时测试失败而不是跳过。一致性测试 `tests/test_plugin_conformance.py` 用 `go run` 运行子模块里的黑盒运行器，需要 Go（版本见 `spec/conformance/go.mod`）；没有 Go 时跳过并给出原因，设置了 `XIHAN_CONFORMANCE_REQUIRED` 时（CI）改为失败。
+`--group` 需要 pip 25.1 以上。测试直接读取 `spec/conformance/vectors/` 下的向量，子模块没有检出时测试失败而不是跳过。一致性测试 `tests/test_plugin_conformance.py` 用 `go run` 运行子模块里的黑盒运行器，需要 Go（版本见 `spec/conformance/go.mod`）；没有 Go 时失败并给出原因，确实要跳过时设置 `XIHAN_CONFORMANCE_REQUIRED=0`。`tests/test_vectors.py` 核对 `spec/conformance/vectors/` 下的每个向量文件要么有测试回放、要么列为豁免并写明理由；规范新增向量文件时这个测试失败，要么回放它，要么写进豁免并给出理由。
 
 协议代码 `src/xihan_framework/plugin/v1/`（消息、服务与 mypy-protobuf 生成的类型存根）由 `spec/plugin/plugin.proto` 生成并提交，改协议后重新生成：
 
