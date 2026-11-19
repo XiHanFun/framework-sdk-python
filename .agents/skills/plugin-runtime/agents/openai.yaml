@@ -1,0 +1,7 @@
+interface:
+  display_name: "Python SDK 插件运行时"
+  short_description: "实现与验证 xihan.plugin.v1 的插件一侧、协议代码与黑盒运行器"
+  default_prompt: "使用 $xihan-sdk-python-plugin-runtime 实现并验证一项插件运行时行为。"
+
+policy:
+  allow_implicit_invocation: true

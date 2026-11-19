@@ -1,0 +1,7 @@
+interface:
+  display_name: "Python SDK 测试审查"
+  short_description: "判断 Python SDK 的测试应保留、改写、合并或删除"
+  default_prompt: "使用 $xihan-sdk-python-test-review 审查指定测试的价值和覆盖边界。"
+
+policy:
+  allow_implicit_invocation: true

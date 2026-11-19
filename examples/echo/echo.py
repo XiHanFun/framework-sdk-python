@@ -8,8 +8,8 @@
 - ``events.list``：列出收到的事件 ID（最多保留最近 1000 个）。
 - 订阅 ``echo.events``（竞争消费），健康项 ``echo``。
 
-运行：宿主按清单的 ``entry`` 启动插件目录里的启动脚本，脚本以绝对路径的解释器执行本文件（见 README「写一个插件」）；
-入口是 ``run(build)``，构造时的配置错误也记进 stderr 的 JSON 日志。
+运行：宿主按清单的 ``entry`` 启动插件目录里的启动脚本，脚本以绝对路径的解释器执行本文件（见文档站 Python SDK 页
+「写一个插件」，https://framework.docs.xihanfun.com/sdks/python）；入口是 ``run(build)``，构造时的配置错误也记进 stderr 的 JSON 日志。
 """
 
 import json

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Python SDK 测试与打包"
+  short_description: "运行 Python SDK 的门禁、向量覆盖、黑盒一致性与分发包验证"
+  default_prompt: "使用 $xihan-sdk-python-testing-release 跑全部门禁并验证分发包。"
+
+policy:
+  allow_implicit_invocation: true
