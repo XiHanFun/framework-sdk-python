@@ -33,7 +33,14 @@ from plugin_support import (
     session,
 )
 from xihan_framework import operation
-from xihan_framework.invocation import Context
+from xihan_framework.invocation import (
+    ERROR_CODE_CANCELLED,
+    ERROR_CODE_DEADLINE_EXCEEDED,
+    MESSAGE_CANCELLED,
+    MESSAGE_DEADLINE_EXCEEDED,
+    Cancellation,
+    Context,
+)
 from xihan_framework.plugin import (
     ENV_HOST_ADDRESS,
     ERROR_CODE_CALLBACK_DENIED,
@@ -1409,6 +1416,54 @@ def test_callback_statuses_are_mapped_by_the_table() -> None:
                 result = await callback(plugin, {"envelopeTenants": [None, None]})
                 # Host.Publish 的 RPC 失败时每一项都是同一个错误
                 assert result == {"invoked": invoked, "published": [published or invoked] * 2}, status
+
+    run(scenario)
+
+
+def test_callbacks_in_flight_at_the_deadline_time_out_and_caller_cancellation_is_cancelled() -> None:
+    probe = Probe()
+    timed_out = {"code": ERROR_CODE_DEADLINE_EXCEEDED, "key": MESSAGE_DEADLINE_EXCEEDED, "details": None}
+    cancelled = {"code": ERROR_CODE_CANCELLED, "key": MESSAGE_CANCELLED, "details": None}
+
+    async def soon(plugin: Any, request: dict[str, Any]) -> dict[str, Any]:
+        """调用 ``probes.callback``，元数据的截止时间在 0.5 秒后，gRPC 自身的截止时间宽松"""
+        message = invoke("probes.callback", json.dumps(request).encode())
+        deadline = datetime.now(UTC) + timedelta(milliseconds=500)
+        message.metadata.deadline = deadline.strftime("%Y-%m-%dT%H:%M:%S.%f0+00:00")
+        response = await plugin.stub.Invoke(message, metadata=session(), timeout=30)
+        assert response.status.ok, response.status
+        result: dict[str, Any] = json.loads(response.payload)
+        return result
+
+    async def scenario() -> None:
+        async with fake_host() as (host, endpoint), running(build(probe), env_with_host(endpoint)) as plugin:
+            await plugin.start()
+            host.delay = 5.0
+            # 处理器在管道里回调：Resilience 阶段派生的取消信号到截止时间也会触发，回调不能因此在本地取消、
+            # 报成取消，要等 gRPC 自己的截止时间报 DeadlineExceeded（invocation.md §5）
+            result = await soon(plugin, {"envelopeTenants": [None]})
+            # Host.Invoke 途中到了截止时间；之后 Host.Publish 发出前截止时间已过，本地按同一行拒绝、不发出
+            assert result == {"invoked": timed_out, "published": [timed_out]}
+            assert (len(host.invocations), host.publications) == (1, [])
+            result = await soon(plugin, {"invoke": False, "envelopeTenants": [None, None]})
+            assert result == {"invoked": None, "published": [timed_out, timed_out]}
+            assert len(host.publications) == 1
+
+            # 调用方在途中取消：回调随之在本地取消，按「Cancelled，取消信号已触发」报取消
+            assert probe.saved is not None
+            client = host_of(probe.saved)
+            source = Cancellation()
+            seen: list[Result[Any]] = []
+
+            async def call(ctx: Context) -> Result[Unit]:
+                seen.append((await client.invoke(ctx, "orders.create")).outcome)
+                envelope = Envelope(topic="orders.created", id="e0", source="urn:probe", type="orders.created")
+                seen.extend(await client.publish(ctx, [envelope]))
+                return success()
+
+            asyncio.get_running_loop().call_later(0.2, source.cancel)
+            await Context(cancellation=source, timeout=30).run(call)
+            assert [outcome(result) for result in seen] == [Outcome(**cancelled), Outcome(**cancelled)]
 
     run(scenario)
 

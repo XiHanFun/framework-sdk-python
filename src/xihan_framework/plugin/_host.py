@@ -241,7 +241,7 @@ class Host:
     async def _call[Req, Res](
         self, ctx: Context, method: grpc.aio.UnaryUnaryMultiCallable[Req, Res], request: Req
     ) -> Res:
-        """带会话令牌与截止时间发出一元调用；上下文的取消信号触发时取消这次调用。"""
+        """带会话令牌与截止时间发出一元调用；调用方取消时取消这次调用，截止时间到了交给 gRPC 自己的截止时间。"""
         remaining = ctx.remaining_time()
         call = method(
             request,
@@ -251,6 +251,11 @@ class Host:
         loop = asyncio.get_running_loop()
 
         def cancel() -> None:
+            # 管道里（Context.run）派生的取消信号到截止时间也会触发：这时不在本地取消，gRPC 带着同一个截止时间，由 grpcio
+            # 以 DEADLINE_EXCEEDED 结束；抢先取消会按「Cancelled，取消信号已触发」报成取消（invocation.md §5）。
+            # run 只在按时钟确认已到期后才因截止时间触发信号，这里按同一个时钟判断，两边一致
+            if ctx.is_expired():
+                return
             # 信号可能在别的线程触发：经事件循环取消；循环已关闭说明调用已经不在了
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(call.cancel)

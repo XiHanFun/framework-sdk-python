@@ -228,7 +228,8 @@ class Received:
 class FakeHost(pb_grpc.HostServicer):
     """记录回调的假宿主：``Invoke`` 默认回 ``{"ok":true}``，``Publish`` 默认逐项成功。
 
-    ``status`` 不为空时以这个 gRPC 状态（消息 ``message``）结束调用；``invoke_status`` 与 ``publish_results`` 改写应答。
+    ``status`` 不为空时以这个 gRPC 状态（消息 ``message``）结束调用；``invoke_status`` 与 ``publish_results`` 改写应答；
+    ``delay`` 是记下回调之后、应答之前等待的秒数，用来让回调在途中遇到截止时间或取消。
     """
 
     invocations: list[Received] = field(default_factory=list)
@@ -237,11 +238,14 @@ class FakeHost(pb_grpc.HostServicer):
     message: str = "boom"
     invoke_status: pb.Status | None = None
     publish_results: list[pb.Status] | None = None
+    delay: float = 0.0
 
     async def Invoke(  # noqa: N802
         self, request: pb.InvokeRequest, context: grpc.aio.ServicerContext[Any, Any]
     ) -> pb.InvokeResponse:
         self.invocations.append(Received(request, _metadata(context), context.time_remaining()))
+        if self.delay > 0:
+            await asyncio.sleep(self.delay)
         if self.status is not None:
             await context.abort(self.status, self.message)
         if self.invoke_status is not None:
@@ -252,6 +256,8 @@ class FakeHost(pb_grpc.HostServicer):
         self, request: pb.PublishRequest, context: grpc.aio.ServicerContext[Any, Any]
     ) -> pb.PublishResponse:
         self.publications.append(Received(request, _metadata(context), context.time_remaining()))
+        if self.delay > 0:
+            await asyncio.sleep(self.delay)
         if self.status is not None:
             await context.abort(self.status, self.message)
         if self.publish_results is not None:
