@@ -155,6 +155,42 @@ def test_error_factories_check_the_kind() -> None:
         assert factory(code, "orders.failed").code == code
 
 
+#: RFC-0001「空白字符」的 25 个码位，照规范逐个写出，作为测试的对照。
+SPEC_WHITESPACE = (
+    *range(0x09, 0x0E),
+    0x20,
+    0x85,
+    0xA0,
+    0x1680,
+    *range(0x2000, 0x200B),
+    0x2028,
+    0x2029,
+    0x202F,
+    0x205F,
+    0x3000,
+)
+#: 为空或只有空白的自由文本：25 个空白字符各一个、合在一起，以及几种常见写法。
+BLANK_TEXTS = ["", " ", " \t　", "".join(map(chr, SPEC_WHITESPACE)), *map(chr, SPEC_WHITESPACE)]
+
+
+@pytest.mark.parametrize("text", BLANK_TEXTS)
+def test_free_text_must_not_be_empty_or_whitespace(text: str) -> None:
+    assert len(SPEC_WHITESPACE) == 25
+    with pytest.raises(FrameworkError) as raised:
+        Error.literal("ORDERS_UNEXPECTED_001", text)
+    assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT
+    with pytest.raises(FrameworkError) as raised:
+        Error.not_found("ORDERS_NOTFOUND_001", "orders.missing").with_text(text)
+    assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT
+
+
+@pytest.mark.parametrize("text", ["\u001c", "​", "\u001c\u001d\u001e\u001f", " boom\t"])
+def test_characters_outside_the_whitespace_table_are_free_text(text: str) -> None:
+    # str.isspace 认 U+001C–U+001F，零宽空格也不在规范的表里：它们都不是空白，文案照常接受、原样保留
+    assert Error.literal("ORDERS_UNEXPECTED_001", text).message == text
+    assert Error.not_found("ORDERS_NOTFOUND_001", "orders.missing").with_text(text).message == text
+
+
 def test_error_details_must_be_json_values() -> None:
     with pytest.raises(FrameworkError) as raised:
         Error("ORDERS_VALIDATION_001", "orders.invalid", {"ids": {1, 2}})  # type: ignore[dict-item]

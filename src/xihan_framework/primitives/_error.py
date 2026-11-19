@@ -5,6 +5,7 @@ from types import MappingProxyType
 from typing import Self
 
 from xihan_framework._json import JsonValue, dumps, parse
+from xihan_framework._whitespace import is_blank
 from xihan_framework.primitives._error_code import (
     ERROR_CODE_INVALID_ARGUMENT,
     KIND_CANCELLED,
@@ -60,10 +61,15 @@ class Error:
         details: Mapping[str, JsonValue] | None = None,
         inner: "Error | None" = None,
     ) -> Self:
-        """用已解析的文案创建：线上还原与异常转换用，没有消息键；文案为空抛出 ``FrameworkError``。"""
+        """用已解析的文案创建：线上还原与异常转换用，没有消息键；文案为空或只有空白抛出 ``FrameworkError``。
+
+        空白按 RFC-0001「空白字符」的 25 个码位，不用 ``str.isspace``：U+001C–U+001F 与零宽空格不是空白（ADR-0245）。
+        """
         validate_error_code(code)
-        if not text:
-            raise FrameworkError(ERROR_CODE_INVALID_ARGUMENT, "A literal error needs a text.")
+        if is_blank(text):
+            raise FrameworkError(
+                ERROR_CODE_INVALID_ARGUMENT, "A literal error needs a text that is not empty or whitespace."
+            )
         return cls._create(code, None, text, _freeze_details(details), inner)
 
     @classmethod
@@ -168,9 +174,11 @@ class Error:
         return self._create(code, self._message_key, self._text, self._details, self._inner)
 
     def with_text(self, text: str) -> "Error":
-        """填入已解析的文案；文案为空抛出 ``FrameworkError``。"""
-        if not text:
-            raise FrameworkError(ERROR_CODE_INVALID_ARGUMENT, "The resolved text of an error must not be empty.")
+        """填入已解析的文案；文案为空或只有空白（RFC-0001「空白字符」）抛出 ``FrameworkError``。"""
+        if is_blank(text):
+            raise FrameworkError(
+                ERROR_CODE_INVALID_ARGUMENT, "The resolved text of an error must not be empty or whitespace."
+            )
         return self._create(self._code, self._message_key, text, self._details, self._inner)
 
     def to_json_value(self) -> dict[str, JsonValue]:
@@ -197,7 +205,7 @@ class Error:
     def from_json_value(cls, value: JsonValue) -> "Error":
         """从线上编码还原（RFC-0001「Result」的 Error 规则）；不合规则抛出 ``FrameworkError``（``PRIMITIVES_VALIDATION_001``）。
 
-        ``code`` 必填且合文法；``message`` 必填，是非空字符串；``messageKey``、``details``、``inner`` 可选，写了就必须
+        ``code`` 必填且合文法；``message`` 必填，是字符串，不能为空或只有空白（RFC-0001「空白字符」）；``messageKey``、``details``、``inner`` 可选，写了就必须
         分别是合文法的键、JSON 对象与合法的 Error，写成 ``null`` 不合法；未知成员忽略。
         """
         if not isinstance(value, Mapping):
@@ -208,8 +216,9 @@ class Error:
                 ERROR_CODE_INVALID_ARGUMENT, f"The error code '{code}' must match <DOMAIN>_<KIND>_<NNN>."
             )
         message = value.get("message")
-        if not isinstance(message, str) or not message:
-            raise _wire_error("An error on the wire needs a non-empty string 'message'.")
+        # 只有空白的 message 与空串一样不合法（ADR-0245）：Error 的文案至少要有一个空白之外的字符
+        if not isinstance(message, str) or is_blank(message):
+            raise _wire_error("An error on the wire needs a string 'message' that is not empty or whitespace.")
         message_key: str | None = None
         if "messageKey" in value:
             candidate = value["messageKey"]

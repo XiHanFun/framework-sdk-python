@@ -9,6 +9,7 @@ from typing import Any, Final
 
 from xihan_framework._codec import encode
 from xihan_framework._json import JsonTextError, JsonValue, dumps, parse
+from xihan_framework._whitespace import is_blank
 from xihan_framework.invocation import Cancellation, Context
 from xihan_framework.plugin._messages import ERROR_CODE_UNEXPECTED, MESSAGE_FAILED
 from xihan_framework.plugin._model import Envelope, HealthItem
@@ -60,8 +61,8 @@ def from_proto_error(error: pb.Error, plugin_id: str) -> Error:
 
     ``code`` 不合错误码文法时整个错误换成 ``PLUGINS_UNEXPECTED_001`` + ``plugins.process.failed``（``phase`` 为
     ``invoke``，``reason`` 为 ``invalid error code '<code>'``）；``message_key`` 合消息键文法的按键处理，否则成为自由文本
-    错误，文案取 ``text``，``text`` 为空时取 ``code``；``details`` 为空、通不过共同的 JSON 读取检查或不是对象时当作没有
-    细节；``inner`` 同此。
+    错误，文案取 ``text``，``text`` 为空或只有空白（RFC-0001「空白字符」）时取 ``code``；``details`` 为空、通不过共同的
+    JSON 读取检查或不是对象时当作没有细节；``inner`` 同此。
     """
     if not is_error_code(error.code):
         return failed(plugin_id, PHASE_INVOKE, f"invalid error code '{error.code}'")
@@ -69,7 +70,8 @@ def from_proto_error(error: pb.Error, plugin_id: str) -> Error:
     inner = from_proto_error(error.inner, plugin_id) if error.HasField("inner") else None
     if is_message_key(error.message_key):
         return Error(error.code, error.message_key, details, inner)
-    return Error.literal(error.code, error.text or error.code, details, inner)
+    # 只有空白的 text 与空串一样取错误码（ADR-0245）：Error 的文案不能只有空白，原样交给 literal 会被拒
+    return Error.literal(error.code, error.code if is_blank(error.text) else error.text, details, inner)
 
 
 def to_status(result: Result[Any]) -> pb.Status:

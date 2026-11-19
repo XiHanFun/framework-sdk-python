@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
+# 握手行与端点里的空白（handshake.md §2）就是 RFC-0001「空白字符」，与 Error 的文案共用同一张表；这里再导出
+from xihan_framework._whitespace import has_whitespace as has_whitespace
+from xihan_framework._whitespace import is_whitespace as is_whitespace
+
 #: 本 SDK 实现的协议版本（``xihan.plugin.v1``）。
 PROTOCOL_VERSION: Final = 1
 #: 本 SDK 支持的全部协议版本，升序。
@@ -30,26 +34,6 @@ ENV_INSTANCE: Final = "XIHAN_PLUGIN_INSTANCE"
 #: 宿主默认区域（BCP 47）。
 ENV_LOCALE: Final = "XIHAN_PLUGIN_LOCALE"
 
-# 握手行与端点里的空白（handshake.md §2，ADR-0237）：与 .NET 正则的 \s 相同。str.isspace 另把 U+001C–U+001F 算作空白，
-# re 的 \s 也随之不同，所以按码点逐个列出
-_WHITESPACE: Final = frozenset(
-    map(
-        chr,
-        (
-            *range(0x09, 0x0E),
-            0x20,
-            0x85,
-            0xA0,
-            0x1680,
-            *range(0x2000, 0x200B),
-            0x2028,
-            0x2029,
-            0x202F,
-            0x205F,
-            0x3000,
-        ),
-    )
-)
 # 握手行的前缀含其后的一个空格；之后的部分与宿主回调端点的一项同一文法
 _HANDSHAKE_LINE_PREFIX: Final = HANDSHAKE_LINE_VERSION + " "
 
@@ -92,20 +76,6 @@ class Endpoint:
         if self.network is Network.TCP:
             return self.address
         return None
-
-
-def is_whitespace(character: str) -> bool:
-    """判断一个字符是不是握手行与回调端点所说的空白（handshake.md §2）。
-
-    集合是 U+0009–U+000D、U+0020、U+0085、U+00A0、U+1680、U+2000–U+200A、U+2028、U+2029、U+202F、U+205F、U+3000；
-    U+200B 等其他字符不算，可以出现在地址里。
-    """
-    return character in _WHITESPACE
-
-
-def has_whitespace(text: str) -> bool:
-    """文本里是否有 ``is_whitespace`` 所说的空白；SDK 自己生成的端点地址不能有（handshake.md §2）。"""
-    return any(character in _WHITESPACE for character in text)
 
 
 def is_loopback_address(address: str) -> bool:
