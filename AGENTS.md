@@ -131,10 +131,10 @@ framework-sdk-python 是 [XiHan Spec](https://github.com/XiHanFun/framework-spec
 ## 发布
 
 - 版本真源是 `src/xihan_framework/__init__.py` 的 `__version__`：hatchling 构建时从这里读（`[tool.hatch.version]`），`primitives.SDK_VERSION` 与握手里的 SDK 版本也取它，`tests/test_package.py` 核对它与分发元数据一致。
-- PyPI 包名 `xihan-framework`，导入名 `xihan_framework`；PyPI 上目前只有占名用的版本，首个版本尚未发布。
+- PyPI 包名 `xihan-framework`，导入名 `xihan_framework`；PyPI 上最早的 `0.0.1` 是占名用的，不是本仓库发布的版本；目前只有预发布版，README 与文档页的安装命令带 `==<版本>` 占位，首个正式版发布后去掉。
 - 发布由 `.github/workflows/release.yml` 在推送 `v*` 标签时执行：guard 跑 `scripts/release-check.sh`（标签在 `main` 上、标签换成 PEP 440 后等于 `__version__`、规范钉在标签上），通过后构建并以 PyPI 可信发布（OIDC）上传；GitHub Release 与 XiHan.Framework 一样在标签推送后手动建。打标签之前先在本地跑同一份脚本；打标签与推送只在用户明确要求时执行，步骤见 `version-release` 技能。首次发布前要用户在 pypi.org 配可信发布者。
 - `__version__` 按 PEP 440 的规范写法（预发布如 `0.1.0rc1`），标签按语义化版本（`v0.1.0-rc.1`），预发布只能用 `-alpha.N`、`-beta.N`、`-rc.N`。
-- 还没有打过标签。按 RFC-0024「实现钉规范」，发预发布或正式版时 `spec/` 子模块必须正好在某个规范标签上，正式版只能钉规范的正式版标签。
+- 按 RFC-0024「实现钉规范」，发预发布或正式版时 `spec/` 子模块必须正好在某个规范标签上，正式版只能钉规范的正式版标签。
 
 ## 分支
 

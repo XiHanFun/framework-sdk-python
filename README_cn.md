@@ -38,10 +38,10 @@
 ## 安装
 
 ```bash
-pip install xihan-framework
+pip install "xihan-framework==<版本>"
 ```
 
-导入名是 `xihan_framework`。核心五块运行时零依赖；插件运行时经 extra `plugin`（`xihan-framework[plugin]`）引入 grpcio 与 protobuf。PyPI 上目前只有占名用的版本，首个版本发布之前从源码安装（见 [Python SDK 文档页](https://framework.docs.xihanfun.com/sdks/python)）。
+导入名是 `xihan_framework`。核心五块运行时零依赖；插件运行时经 extra `plugin`（`xihan-framework[plugin]`）引入 grpcio 与 protobuf。目前只有预发布版，要写明版本号：`<版本>` 换成 PyPI 上的版本，按 PEP 440 写（标签的 `-rc.N` 写作 `rcN`），版本列表见 [Releases](https://github.com/XiHanFun/framework-sdk-python/releases)；不写版本会装到 PyPI 上占名用的旧版本。
 
 ## 快速开始
 
@@ -111,7 +111,7 @@ asyncio.run(main())
 
 ## 状态
 
-核心五块与插件运行时可用，示例插件 `examples/echo` 通过规范黑盒运行器的全部用例。一致性（RFC-0024）：钉的规范版本是 `spec/` 子模块指向的提交，认领的档是 `core` 与 `plugin`，没有缺口。在有钉在规范标签上的发布版之前，成熟度是 Experimental；细节见 [Python SDK 文档页](https://framework.docs.xihanfun.com/sdks/python)。
+核心五块与插件运行时可用，示例插件 `examples/echo` 通过规范黑盒运行器的全部用例。一致性（RFC-0024）：钉的规范版本是 `spec/` 子模块指向的提交，认领的档是 `core` 与 `plugin`，没有缺口。成熟度是 Experimental：已有钉在规范 rc 标签上的预发布版，到 Stable 还要钉在规范正式版标签上的发布版；细节见 [Python SDK 文档页](https://framework.docs.xihanfun.com/sdks/python)。
 
 ## 生态
 

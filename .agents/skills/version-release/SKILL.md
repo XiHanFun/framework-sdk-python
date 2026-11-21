@@ -10,8 +10,8 @@ description: 为 Python SDK 准备版本、更新 src/xihan_framework/__init__.p
 - 工作区干净，无 merge/rebase、冲突或 detached HEAD；目标版本由用户给出，不替用户选版本级别或通道。
 - 版本真源是 `src/xihan_framework/__init__.py` 的 `__version__`：hatchling 从这里读（`[tool.hatch.version]`），`primitives.SDK_VERSION` 与握手里的 SDK 版本也取它，`tests/test_package.py` 核对它与分发元数据一致。
 - `__version__` 按 PEP 440 的规范写法（`tests/test_package.py` 要求它等于分发元数据里规范化之后的版本），标签按语义化版本写，与其他 SDK 一致：`v0.1.0` 对 `0.1.0`，`v0.1.0-alpha.N` / `-beta.N` / `-rc.N` 对 `0.1.0aN` / `0.1.0bN` / `0.1.0rcN`；别的预发布后缀写不成 PEP 440 的版本，不能用。
-- PyPI 包名 `xihan-framework`，导入名 `xihan_framework`；PyPI 上目前只有占名用的版本。
-- 标签写成 `v<版本>`，只从 `main` 打，还没有打过；推送 `v*` 标签由 `.github/workflows/release.yml` 发布到 PyPI。
+- PyPI 包名 `xihan-framework`，导入名 `xihan_framework`；PyPI 上最早的 `0.0.1` 是占名用的，不是本仓库发布的版本；目前只有预发布版，README 与文档页的安装命令带 `==<版本>` 占位，首个正式版发布后去掉。
+- 标签写成 `v<版本>`，只从 `main` 打；推送 `v*` 标签由 `.github/workflows/release.yml` 发布到 PyPI。
 
 ## 发版核对与工作流
 
@@ -40,7 +40,7 @@ description: 为 Python SDK 准备版本、更新 src/xihan_framework/__init__.p
 
 1. 跑 `bash scripts/release-check.sh vX.Y.Z main`，全部通过才往下走；不通过就停下报告。
 2. `git tag -a vX.Y.Z -m "vX.Y.Z" main`，再 `git push origin vX.Y.Z`，用用户自己的权限。
-3. 等 `release.yml` 跑完，核对 PyPI 上的版本、项目说明与安装（`pip install xihan-framework`）；失败就停下报告。
+3. 等 `release.yml` 跑完，核对 PyPI 上的版本、项目说明与安装（`pip install "xihan-framework==<版本>"`）；失败就停下报告。
 4. 用户要建 GitHub Release 时：`gh release create vX.Y.Z --verify-tag --title vX.Y.Z --notes-file <正文>`，预发布加 `--prerelease`，正文写钉的规范标签与这一版的变化，与 XiHan.Framework 相同。
 
 PyPI 上同一版本号不能重新上传，发错了只能用下一个号。guard 不通过时没有发布，删掉标签、改正之后重打即可。需要绕过工作流手动上传时，用用户自己的 PyPI 凭据，由用户执行；不替用户输入令牌。

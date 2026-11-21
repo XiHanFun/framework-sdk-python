@@ -38,10 +38,10 @@ The Python implementation of [XiHan Spec](https://github.com/XiHanFun/framework-
 ## Installation
 
 ```bash
-pip install xihan-framework
+pip install "xihan-framework==<version>"
 ```
 
-The import name is `xihan_framework`. The five core modules have no runtime dependencies; the plugin runtime needs grpcio and protobuf through the extra `plugin` (`xihan-framework[plugin]`). PyPI currently has only a release that reserves the name, so install from source until the first release is published (see the [Python SDK page](https://framework.docs.xihanfun.com/sdks/python)).
+The import name is `xihan_framework`. The five core modules have no runtime dependencies; the plugin runtime needs grpcio and protobuf through the extra `plugin` (`xihan-framework[plugin]`). Only prereleases are published so far, so write the version out: replace `<version>` with the version on PyPI, written per PEP 440 (a tag's `-rc.N` becomes `rcN`); versions are listed under [Releases](https://github.com/XiHanFun/framework-sdk-python/releases). Without a version pip installs the old release that only reserves the name.
 
 ## Quick Start
 
@@ -111,7 +111,7 @@ The documentation site is in Chinese. The notes on the example above (errors and
 
 ## Status
 
-The five core modules and the plugin runtime are usable, and the example plugin `examples/echo` passes every case of the spec's black-box runner. Conformance (RFC-0024): the pinned spec version is the commit of the `spec/` submodule, the claimed profiles are `core` and `plugin`, and there are no gaps. Until there is a release pinned to a spec tag, the maturity is Experimental; details are on the [Python SDK page](https://framework.docs.xihanfun.com/sdks/python).
+The five core modules and the plugin runtime are usable, and the example plugin `examples/echo` passes every case of the spec's black-box runner. Conformance (RFC-0024): the pinned spec version is the commit of the `spec/` submodule, the claimed profiles are `core` and `plugin`, and there are no gaps. The maturity is Experimental: there is a prerelease pinned to a spec rc tag, and Stable also needs a release pinned to a formal spec tag; details are on the [Python SDK page](https://framework.docs.xihanfun.com/sdks/python).
 
 ## Ecosystem
 
