@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from xihan_framework import manifest
+from xihan_framework import manifest, operation
 from xihan_framework.manifest import (
     CapabilityDeclaration,
     CapabilityRequirement,
@@ -275,6 +275,8 @@ def test_contributed_operations_follow_the_operation_id_grammar() -> None:
     # RFC-0002 解析规则 2（ADR-0233）：contributes.operations 的每一项符合操作 ID 文法，与 operation.is_id 同一条
     for operation_id in ["orders.create", "order-lines.list", "a1.b2", "items-v2.get-many"]:
         assert read_ok(manifest_json(contributes={"operations": [operation_id]})).operations == (operation_id,)
+        assert operation.is_id(operation_id), operation_id
+        assert Contributions(operations=(operation_id,)).operations == (operation_id,)
     for operation_id in [
         "orders-.create",
         "-orders.create",
@@ -288,6 +290,17 @@ def test_contributed_operations_follow_the_operation_id_grammar() -> None:
         assert read_error(manifest_json(contributes={"operations": [operation_id]})) == invalid(
             "$.contributes.operations[0]"
         ), operation_id
+        # 契约与清单的模型用的是同一个文法：三处的判定一致
+        assert not operation.is_id(operation_id), operation_id
+        with pytest.raises(FrameworkError, match=r"<resource>[.]<verb>"):
+            Manifest(
+                id="xihan.samples.echo",
+                version="1.0.0",
+                primitives=1,
+                stability=Stability.STABLE,
+                kind=Kind.CAPABILITY,
+                contributes=Contributions(operations=(operation_id,)),
+            )
 
 
 def test_requirements_follow_the_vectors(vector: VectorLoader) -> None:

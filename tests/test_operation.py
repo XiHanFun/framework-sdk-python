@@ -14,7 +14,17 @@ import pytest
 from xihan_framework import operation, pipeline
 from xihan_framework._json import JsonNumber, JsonValue
 from xihan_framework.invocation import ERROR_CODE_CANCELLED, ERROR_CODE_DEADLINE_EXCEEDED, Cancellation, Context
-from xihan_framework.operation import Contract, Int32, Invoker, Registry, Request, Response, Schema, json_field
+from xihan_framework.operation import (
+    Contract,
+    Expose,
+    Int32,
+    Invoker,
+    Registry,
+    Request,
+    Response,
+    Schema,
+    json_field,
+)
 from xihan_framework.pipeline import Builder, Step
 from xihan_framework.primitives import (
     BAGGAGE_CORRELATION,
@@ -302,6 +312,198 @@ def test_sequential_invocations_on_one_context_do_not_leak() -> None:
 
 
 @dataclass(frozen=True)
+class Wrap:
+    quantity: int = 0
+
+
+@dataclass(frozen=True)
+class Wrapped:
+    inner: str
+
+
+@dataclass(frozen=True)
+class Named:
+    name: str
+
+
+def state_of(ctx: Context) -> tuple[str | None, str | None, object, object]:
+    """中间件此刻从上下文读到的调用状态：操作 ID、请求的 ID、解码好的请求与响应对象。"""
+    descriptor = operation.current(ctx)
+    request = operation.request_of(ctx)
+    return (
+        None if descriptor is None else descriptor.id,
+        None if request is None else request.id,
+        operation.decoded_request_of(ctx),
+        operation.response_of(ctx),
+    )
+
+
+def test_nested_invocations_keep_their_own_state() -> None:
+    # 处理器在调用里再调一个操作：内层返回之后，外层的中间件读到的仍是外层的操作、请求与响应
+    registry = Registry()
+    invokers: list[Invoker] = []
+    seen: list[tuple[tuple[str | None, str | None, object, object], ...]] = []
+
+    async def wrap(ctx: Context, request: Wrap) -> Result[Wrapped]:
+        payload = json.dumps({"quantity": request.quantity}).encode("utf-8")
+        inner = await invokers[0].invoke(ctx, Request("orders.create", payload))
+        assert inner.payload is not None, inner
+        return ok(Wrapped(inner=inner.payload.decode("utf-8")))
+
+    async def record(ctx: Context, next_step: Step) -> Result[Unit]:
+        before = state_of(ctx)
+        outcome = await next_step(ctx)
+        seen.append((before, state_of(ctx)))
+        return outcome
+
+    registry.add(Contract("orders.create"), create_order, request_type=CreateOrder, response_type=OrderCreated)
+    registry.add(Contract("orders.wrap"), wrap, request_type=Wrap, response_type=Wrapped)
+    invokers.append(Invoker(registry, Builder().use_at(pipeline.func("Record", record), PipelineStage.TRANSACTION)))
+    ctx = Context(baggage={BAGGAGE_CORRELATION: "c4"})
+    response = invoke(invokers[0], Request("orders.wrap", b'{"quantity":2}'), ctx)
+    created = OrderCreated(id="o-c4", quantity=2)
+    wrapped = Wrapped(inner='{"id":"o-c4","quantity":2}')
+    assert response.payload == b'{"inner":"{\\"id\\":\\"o-c4\\",\\"quantity\\":2}"}'
+    assert seen == [
+        (
+            ("orders.create", "orders.create", CreateOrder(quantity=2), None),
+            ("orders.create", "orders.create", CreateOrder(quantity=2), created),
+        ),
+        (
+            ("orders.wrap", "orders.wrap", Wrap(quantity=2), None),
+            ("orders.wrap", "orders.wrap", Wrap(quantity=2), wrapped),
+        ),
+    ]
+    # 调用方的上下文上读到的是最后结束的那次调用：外层，不是内层
+    assert state_of(ctx) == ("orders.wrap", "orders.wrap", Wrap(quantity=2), wrapped)
+    assert operation.response_payload_of(ctx) == response.payload
+    # 类型化的外层同样如此
+    seen.clear()
+    typed = asyncio.run(invokers[0].invoke_typed(ctx, "orders.wrap", Wrap(quantity=3), Wrapped))
+    assert typed.value == Wrapped(inner='{"id":"o-c4","quantity":3}')
+    assert [after[0] for _, after in seen] == ["orders.create", "orders.wrap"]
+    assert seen[1][1][3] == typed.value
+
+
+def test_a_middleware_that_invokes_another_operation_keeps_the_current_one() -> None:
+    # 中间件在往下走之前先调了另一个操作（如按另一个操作的结果判定）：这次调用执行的仍是它自己的操作与请求
+    registry = Registry()
+    invokers: list[Invoker] = []
+    checked: list[object] = []
+
+    async def wrap(ctx: Context, request: Wrap) -> Result[Wrapped]:
+        return ok(Wrapped(inner=f"wrapped {request.quantity}"))
+
+    async def check(ctx: Context, next_step: Step) -> Result[Unit]:
+        descriptor = operation.current(ctx)
+        assert descriptor is not None
+        if descriptor.id == "orders.wrap":
+            typed = await invokers[0].invoke_typed(ctx, "orders.create", CreateOrder(quantity=1), OrderCreated)
+            raw = await invokers[0].invoke(ctx, Request("orders.create", b'{"quantity":5}'))
+            checked.extend([typed.value, raw.payload, state_of(ctx)])
+        return await next_step(ctx)
+
+    registry.add(Contract("orders.create"), create_order, request_type=CreateOrder, response_type=OrderCreated)
+    registry.add(Contract("orders.wrap"), wrap, request_type=Wrap, response_type=Wrapped)
+    invokers.append(Invoker(registry, Builder().use_at(pipeline.func("Check", check), PipelineStage.AUTHORIZE)))
+    ctx = Context(baggage={BAGGAGE_CORRELATION: "c5"})
+    response = invoke(invokers[0], Request("orders.wrap", b'{"quantity":2}'), ctx)
+    assert response.payload == b'{"inner":"wrapped 2"}'
+    typed = asyncio.run(invokers[0].invoke_typed(ctx, "orders.wrap", Wrap(quantity=4), Wrapped))
+    assert typed.value == Wrapped(inner="wrapped 4")
+    # Authorize 阶段在 Validate 之前：原始调用此时还没有解码好的请求，类型化调用的请求就是传入的对象
+    inner = [OrderCreated(id="o-c5", quantity=1), b'{"id":"o-c5","quantity":5}']
+    assert checked == [
+        *inner,
+        ("orders.wrap", "orders.wrap", None, None),
+        *inner,
+        ("orders.wrap", "orders.wrap", Wrap(quantity=4), None),
+    ]
+
+
+def test_concurrent_invocations_on_one_context_do_not_mix() -> None:
+    # 同一个上下文上并发的两次调用各有各的状态：谁也不会执行到另一个操作，或拿到另一个操作的响应
+    registry = Registry()
+    seen: list[tuple[str | None, str | None, object, object]] = []
+
+    async def first(ctx: Context, request: Wrap) -> Result[Named]:
+        return ok(Named(f"first {request.quantity}"))
+
+    async def second(ctx: Context, request: Wrap) -> Result[Named]:
+        return ok(Named(f"second {request.quantity}"))
+
+    registry.add(Contract("firsts.get"), first, request_type=Wrap, response_type=Named)
+    registry.add(Contract("seconds.get"), second, request_type=Wrap, response_type=Named)
+
+    async def main() -> tuple[tuple[Response, ...], tuple[Result[Named], ...]]:
+        barrier = asyncio.Barrier(2)
+
+        async def suspend(ctx: Context, next_step: Step) -> Result[Unit]:
+            # 两次调用都走到这里才放行：此时两边都已进入管道、解码了各自的请求
+            await barrier.wait()
+            outcome = await next_step(ctx)
+            seen.append(state_of(ctx))
+            return outcome
+
+        invoker = Invoker(registry, Builder().use_at(pipeline.func("Suspend", suspend), PipelineStage.TRANSACTION))
+        ctx = Context()
+        raw = await asyncio.gather(
+            invoker.invoke(ctx, Request("firsts.get", b'{"quantity":1}')),
+            invoker.invoke(ctx, Request("seconds.get", b'{"quantity":2}')),
+        )
+        typed = await asyncio.gather(
+            invoker.invoke_typed(ctx, "firsts.get", Wrap(quantity=3), Named),
+            invoker.invoke_typed(ctx, "seconds.get", Wrap(quantity=4), Named),
+        )
+        return raw, typed
+
+    raw, typed = asyncio.run(main())
+    assert [response.payload for response in raw] == [b'{"name":"first 1"}', b'{"name":"second 2"}']
+    assert [result.value for result in typed] == [Named("first 3"), Named("second 4")]
+    assert sorted(seen, key=str) == sorted(
+        [
+            ("firsts.get", "firsts.get", Wrap(quantity=1), Named("first 1")),
+            ("seconds.get", "seconds.get", Wrap(quantity=2), Named("second 2")),
+            ("firsts.get", "firsts.get", Wrap(quantity=3), Named("first 3")),
+            ("seconds.get", "seconds.get", Wrap(quantity=4), Named("second 4")),
+        ],
+        key=str,
+    )
+
+
+def test_the_terminal_only_runs_the_invocation_its_context_carries() -> None:
+    # 调用的状态随派生的上下文往下传：中间件派生出的上下文照常执行；换成不是由它派生的上下文（哪怕共享对象袋）时
+    # 终点不去执行对象袋里最近的那次调用，以未登记结束
+    callers: list[Context] = []
+
+    async def derive(ctx: Context, next_step: Step) -> Result[Unit]:
+        return await next_step(ctx.with_baggage(BAGGAGE_CORRELATION, "c7").with_cancellation(Cancellation()))
+
+    async def hand_back_the_callers(ctx: Context, next_step: Step) -> Result[Unit]:
+        return await next_step(callers[-1])
+
+    async def start_over(ctx: Context, next_step: Step) -> Result[Unit]:
+        return await next_step(Context())
+
+    def run(step: Callable[[Context, Step], Any]) -> tuple[Response, Result[OrderCreated]]:
+        invoker = new_invoker(Builder().use_at(pipeline.func("Replace", step), PipelineStage.AUTHORIZE))
+        callers.append(Context())
+        raw = invoke(invoker, Request("orders.create", b'{"quantity":1}'), callers[-1])
+        typed = asyncio.run(invoker.invoke_typed(callers[-1], "orders.create", CreateOrder(quantity=2), OrderCreated))
+        return raw, typed
+
+    raw, typed = run(derive)
+    assert raw.payload == b'{"id":"o-c7","quantity":1}'
+    assert typed.value == OrderCreated(id="o-c7", quantity=2)
+    for step in (hand_back_the_callers, start_over):
+        raw, typed = run(step)
+        for error in (raw.outcome.error, typed.error):
+            assert error is not None
+            assert (error.code, error.message_key) == (operation.ERROR_CODE_NOT_FOUND, operation.MESSAGE_NOT_FOUND)
+        assert raw.payload is None
+
+
+@dataclass(frozen=True)
 class Refresh:
     key: str
     ttl_ms: int = field(metadata=json_field("ttlMs"))
@@ -385,6 +587,44 @@ def test_contracts_schemas_and_types_are_checked_when_registering() -> None:
 
     with pytest.raises(TypeError):
         Registry().add(Contract("sets.create"), handle, request_type=set, response_type=Empty)
+
+
+def test_contracts_expose_only_the_five_protocols() -> None:
+    # RFC-0011：Expose.All 冻结为五个协议；值是插件协议 OperationDeclaration.expose 里的小写名字
+    assert [(protocol.name, protocol.value) for protocol in Expose] == [
+        ("HTTP", "http"),
+        ("GRPC", "grpc"),
+        ("MCP", "mcp"),
+        ("COMMAND_LINE", "commandline"),
+        ("AI", "ai"),
+    ]
+    # 早先的常量是枚举成员的别名，照旧等于那些字符串
+    aliases = (
+        operation.EXPOSE_HTTP,
+        operation.EXPOSE_GRPC,
+        operation.EXPOSE_MCP,
+        operation.EXPOSE_COMMAND_LINE,
+        operation.EXPOSE_AI,
+    )
+    assert aliases == tuple(Expose) == ("http", "grpc", "mcp", "commandline", "ai")
+    assert all(alias is member for alias, member in zip(aliases, Expose, strict=True))
+    assert (str(Expose.AI), f"{Expose.COMMAND_LINE}", json.dumps([Expose.HTTP])) == ("ai", "commandline", '["http"]')
+    # 名字与成员都收，契约里一律是成员
+    contract = Contract("orders.list", expose=(Expose.HTTP, "ai", operation.EXPOSE_MCP))
+    assert contract.expose == (Expose.HTTP, Expose.AI, Expose.MCP) == ("http", "ai", "mcp")
+    assert all(type(protocol) is Expose for protocol in contract.expose)
+    assert Contract("orders.list").expose == ()
+    assert Contract("orders.list", expose=frozenset({"grpc"})).expose == (Expose.GRPC,)  # type: ignore[arg-type]
+    # 五个协议之外的名字（含大小写不同的写法）在构造时拒绝
+    for unknown in ["HTTP", "rest", "", "http ", "command-line", 1, None]:
+        with pytest.raises(FrameworkError, match=r"'orders\.list'") as raised:
+            Contract("orders.list", expose=(unknown,))  # type: ignore[arg-type]
+        assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT, unknown
+    # 单个字符串不是一组协议：不逐个字符去认
+    for not_a_tuple in ["http", Expose.HTTP, 5]:
+        with pytest.raises(FrameworkError, match="tuple of protocols") as raised:
+            Contract("orders.list", expose=not_a_tuple)  # type: ignore[arg-type]
+        assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT, not_a_tuple
 
 
 def test_unhandled_exceptions_become_unexpected_errors(caplog: pytest.LogCaptureFixture) -> None:

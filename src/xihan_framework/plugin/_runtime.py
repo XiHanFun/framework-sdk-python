@@ -81,7 +81,6 @@ from xihan_framework.plugin.v1 import plugin_pb2 as pb
 from xihan_framework.plugin.v1 import plugin_pb2_grpc as pb_grpc
 from xihan_framework.primitives import (
     DEFAULT_LOCALE,
-    ERROR_CODE_INVALID_ARGUMENT,
     SDK_NAME,
     SDK_VERSION,
     SPEC_VERSION,
@@ -94,6 +93,7 @@ from xihan_framework.primitives import (
     fail,
     success,
 )
+from xihan_framework.primitives._error_code import invalid_argument
 
 _logger = logging.getLogger("xihan_framework.plugin")
 
@@ -159,21 +159,19 @@ class Plugin:
             raise FrameworkError.of(read.error)
         parsed = read.value_or_raise()
         if parsed.kind is not manifests.Kind.PLUGIN or parsed.isolation is not manifests.Isolation.OUT_OF_PROCESS:
-            raise _configuration_error(
-                f"The manifest '{parsed.id}' must describe a plugin with isolation out-of-process."
-            )
+            raise invalid_argument(f"The manifest '{parsed.id}' must describe a plugin with isolation out-of-process.")
         if parsed.contributes.pipeline:
-            raise _configuration_error(
+            raise invalid_argument(
                 f"The plugin '{parsed.id}' must not declare 'contributes.pipeline': only wasm plugins can contribute middleware."
             )
         if str(parsed.primitives) != SPEC_VERSION:
-            raise _configuration_error(
+            raise invalid_argument(
                 f"The plugin '{parsed.id}' declares primitives {parsed.primitives}; this SDK implements primitives {SPEC_VERSION}."
             )
         registry = Registry() if operations is None else operations
         for descriptor in registry.descriptors():
             if descriptor.id not in parsed.operations:
-                raise _configuration_error(
+                raise invalid_argument(
                     f"The operation '{descriptor.id}' is not declared in contributes.operations of '{parsed.id}'."
                 )
         # 宿主拒绝同一（主题，类型）对以两种方式各声明一次（handshake.md §3 第 5 条），在监听之前就拒绝
@@ -181,26 +179,26 @@ class Plugin:
         for handler in subscriptions:
             key = (handler.subscription.topic, handler.subscription.message_type)
             if key in declared:
-                raise _configuration_error(
+                raise invalid_argument(
                     f"The subscription '{key[0]}' with the message type '{key[1]}' is declared more than once by '{parsed.id}'."
                 )
             declared.add(key)
         frozen_catalogs = dict(catalogs or {})
         for name, catalog in frozen_catalogs.items():
             if not name:
-                raise _configuration_error(f"The message catalogs of '{parsed.id}' need non-empty names.")
+                raise invalid_argument(f"The message catalogs of '{parsed.id}' need non-empty names.")
             # 运行时的键由宿主提供，SDK 不随握手发送它们（handshake.md §3 第 6 条）
             if name == CATALOG_NAME or catalog is CATALOG:
-                raise _configuration_error(
+                raise invalid_argument(
                     f"The message catalog '{name}' of '{parsed.id}' is the runtime catalog '{CATALOG_NAME}': "
                     "the host provides its keys, so it is not sent with the handshake."
                 )
             if DEFAULT_LOCALE not in catalog.locales:
-                raise _configuration_error(
+                raise invalid_argument(
                     f"The message catalog '{name}' of '{parsed.id}' has no {DEFAULT_LOCALE} templates."
                 )
         if network is Network.NPIPE:
-            raise _configuration_error("grpcio cannot listen on Windows named pipes; use 'unix' or 'tcp'.")
+            raise invalid_argument("grpcio cannot listen on Windows named pipes; use 'unix' or 'tcp'.")
         self._manifest = parsed
         self._manifest_text = text
         self._invoker = Invoker(registry, pipeline)
@@ -365,7 +363,7 @@ class _Runtime:
         self.tenants = TenantLedger()
         self.session = environ.get(ENV_SESSION, "")
         if not self.session:
-            raise _configuration_error(
+            raise invalid_argument(
                 f"The environment variable '{ENV_SESSION}' is required: the host starts plugins with it."
             )
         self.instance = environ.get(ENV_INSTANCE, "")
@@ -1234,8 +1232,3 @@ def _manifest_text(manifest: str | bytes | None) -> str:
                 Error(manifests.ERROR_CODE_INVALID_MANIFEST, manifests.MESSAGE_INVALID_JSON, {"reason": "$"})
             ) from error
     return manifest.removeprefix(chr(0xFEFF))
-
-
-def _configuration_error(message: str) -> FrameworkError:
-    """插件声明不合法的配置错误。"""
-    return FrameworkError(ERROR_CODE_INVALID_ARGUMENT, message)

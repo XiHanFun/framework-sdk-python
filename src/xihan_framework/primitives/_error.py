@@ -16,6 +16,7 @@ from xihan_framework.primitives._error_code import (
     KIND_UNAVAILABLE,
     KIND_UNEXPECTED,
     KIND_VALIDATION,
+    invalid_argument,
     is_error_code,
     validate_error_code,
 )
@@ -209,7 +210,7 @@ class Error:
         分别是合文法的键、JSON 对象与合法的 Error，写成 ``null`` 不合法；未知成员忽略。
         """
         if not isinstance(value, Mapping):
-            raise _wire_error("An error on the wire must be a JSON object.")
+            raise invalid_argument("An error on the wire must be a JSON object.")
         code = value.get("code")
         if not isinstance(code, str) or not is_error_code(code):
             raise FrameworkError(
@@ -218,18 +219,20 @@ class Error:
         message = value.get("message")
         # 只有空白的 message 与空串一样不合法（ADR-0245）：Error 的文案至少要有一个空白之外的字符
         if not isinstance(message, str) or is_blank(message):
-            raise _wire_error("An error on the wire needs a string 'message' that is not empty or whitespace.")
+            raise invalid_argument("An error on the wire needs a string 'message' that is not empty or whitespace.")
         message_key: str | None = None
         if "messageKey" in value:
             candidate = value["messageKey"]
             if not isinstance(candidate, str) or not is_message_key(candidate):
-                raise _wire_error(f"The 'messageKey' {candidate!r} of an error on the wire is not a valid message key.")
+                raise invalid_argument(
+                    f"The 'messageKey' {candidate!r} of an error on the wire is not a valid message key."
+                )
             message_key = candidate
         details: Mapping[str, JsonValue] | None = None
         if "details" in value:
             candidate_details = value["details"]
             if not isinstance(candidate_details, Mapping):
-                raise _wire_error("The 'details' of an error on the wire must be a JSON object.")
+                raise invalid_argument("The 'details' of an error on the wire must be a JSON object.")
             details = candidate_details
         inner: Error | None = None
         if "inner" in value:
@@ -243,7 +246,7 @@ class Error:
         try:
             value = parse(text)
         except ValueError as error:
-            raise _wire_error("The error is not valid JSON.") from error
+            raise invalid_argument("The error is not valid JSON.") from error
         return cls.from_json_value(value)
 
     def __str__(self) -> str:
@@ -339,8 +342,3 @@ def _check_json_value(value: object, path: str) -> None:
         ERROR_CODE_INVALID_ARGUMENT,
         f"The error detail '{path}' must be a JSON value, got a value of type '{type(value).__name__}'.",
     )
-
-
-def _wire_error(message: str) -> FrameworkError:
-    """线上编码不合法的配置错误。"""
-    return FrameworkError(ERROR_CODE_INVALID_ARGUMENT, message)

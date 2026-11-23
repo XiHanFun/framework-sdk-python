@@ -80,13 +80,19 @@ _DEADLINE_EXCEEDED: Final[int] = grpc.StatusCode.DEADLINE_EXCEEDED.value[0]
 HOST_ITEM: Final = ItemKey["Host"]("xihan.plugin.host")
 
 
-def host_of(ctx: Context) -> Host:
-    """当前调用的宿主客户端：运行时在每次 ``Invoke`` 与 ``HandleEvent`` 的上下文里都放入它。
+def find_host(ctx: Context) -> Host | None:
+    """当前调用的宿主客户端；上下文不是插件运行时建的（例如测试里直接调用处理器）时为 ``None``。
 
-    宿主没有给出可用的回调端点时它照样在，每次回调都以 ``plugins.host.unavailable`` 失败（handshake.md §4）。上下文
-    不是插件运行时建的（例如测试里直接调用处理器）时抛出 ``FrameworkError``。
+    运行时在每次 ``Invoke`` 与 ``HandleEvent`` 的上下文里都放入它：宿主没有给出可用的回调端点时它照样在，每次回调都以
+    ``plugins.host.unavailable`` 失败（handshake.md §4）。在运行时之外也要能跑的处理器用它，自己决定没有宿主时怎么办；
+    一定在运行时里的用 ``host_of``。
     """
-    host = ctx.find_item(HOST_ITEM)
+    return ctx.find_item(HOST_ITEM)
+
+
+def host_of(ctx: Context) -> Host:
+    """当前调用的宿主客户端，与 ``find_host`` 取的是同一个；上下文不是插件运行时建的时抛出 ``FrameworkError``。"""
+    host = find_host(ctx)
     if host is None:
         raise FrameworkError(
             ERROR_CODE_INVALID_ARGUMENT,

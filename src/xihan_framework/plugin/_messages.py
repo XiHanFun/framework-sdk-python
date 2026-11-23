@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Final
 
 from xihan_framework._json import JsonTextError, parse
-from xihan_framework.primitives import DEFAULT_LOCALE, ERROR_CODE_INVALID_ARGUMENT, Catalog, FrameworkError
+from xihan_framework.primitives import DEFAULT_LOCALE, Catalog, is_locale_name, validate_locale_name
+from xihan_framework.primitives._error_code import invalid_argument
 
 #: 插件不在可服务状态；回调时连不上宿主或没有可用的回调端点。
 ERROR_CODE_UNAVAILABLE: Final = "PLUGINS_UNAVAILABLE_001"
@@ -41,29 +42,37 @@ LOCALES: Final = ("en-US", "zh-CN", "zh-TW", "ja-JP", "ko-KR", "de-DE", "es-ES",
 def load_catalog(directory: Traversable | str | os.PathLike[str]) -> Catalog:
     """从目录读消息目录：每种区域一个 ``<区域>.json``，内容是键 → 模板的 JSON 对象。
 
-    文本按 XiHan 的共同 JSON 读取检查读取（重复的键、BOM 都不合法）；不是 JSON 对象、模板不是字符串、键不合文法或
-    没有 ``en-US.json`` 时抛出 ``FrameworkError``（``PRIMITIVES_VALIDATION_001``）。其他文件忽略。
+    文件名（去掉 ``.json``）是区域名（RFC-0010「区域」），不区分大小写，按规范形式归到目录里（``zh-cn.json`` 即 ``zh-CN``）。
+    文本按 XiHan 的共同 JSON 读取检查读取（重复的键、BOM 都不合法）；文件名不是区域名、两个文件名只差大小写、不是 JSON
+    对象、模板不是字符串、键不合文法或没有 ``en-US.json`` 时抛出 ``FrameworkError``（``PRIMITIVES_VALIDATION_001``）。
+    不以 ``.json`` 结尾的文件忽略。
     """
     root: Traversable = Path(directory) if isinstance(directory, (str, os.PathLike)) else directory
     locales: dict[str, dict[str, str]] = {}
     for entry in sorted(root.iterdir(), key=lambda item: item.name):
         if not entry.is_file() or not entry.name.endswith(".json"):
             continue
+        name = entry.name.removesuffix(".json")
+        if not is_locale_name(name):
+            raise invalid_argument(
+                f"The message catalog file '{entry.name}' must be named after a locale such as 'en-US'."
+            )
+        # 区分大小写的文件系统上 en-US.json 与 en-us.json 可以并存，它们是同一个区域
+        locale = validate_locale_name(name)
+        if locale in locales:
+            raise invalid_argument(
+                f"The message catalog directory '{root.name}' has more than one file for the locale '{locale}'."
+            )
         try:
             value = parse(entry.read_bytes())
         except JsonTextError as error:
-            raise _invalid(f"The message catalog file '{entry.name}' is not valid JSON.") from error
+            raise invalid_argument(f"The message catalog file '{entry.name}' is not valid JSON.") from error
         if not isinstance(value, dict) or not all(isinstance(template, str) for template in value.values()):
-            raise _invalid(f"The message catalog file '{entry.name}' must be a JSON object of strings.")
-        locales[entry.name.removesuffix(".json")] = {key: str(template) for key, template in value.items()}
+            raise invalid_argument(f"The message catalog file '{entry.name}' must be a JSON object of strings.")
+        locales[locale] = {key: str(template) for key, template in value.items()}
     if DEFAULT_LOCALE not in locales:
-        raise _invalid(f"The message catalog directory '{root.name}' has no {DEFAULT_LOCALE}.json.")
+        raise invalid_argument(f"The message catalog directory '{root.name}' has no {DEFAULT_LOCALE}.json.")
     return Catalog(locales)
-
-
-def _invalid(message: str) -> FrameworkError:
-    """消息目录不合法的配置错误。"""
-    return FrameworkError(ERROR_CODE_INVALID_ARGUMENT, message)
 
 
 #: 运行时自己的消息目录（参考实现的 10 种区域），供本地渲染（如写日志）。宿主有同样的目录，按消息键把错误翻译成

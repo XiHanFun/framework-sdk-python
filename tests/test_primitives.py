@@ -1,6 +1,7 @@
 """primitives 的测试：一致性向量（错误码、Baggage 键、生命周期迁移）与编码、消息、工厂的用例。"""
 
 import math
+import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -322,6 +323,100 @@ def test_catalog_checks_keys_and_falls_back_to_english() -> None:
     assert catalog.resolve("orders.other", "en-US", None) is None
 
 
+#: 正好 35 个字符的区域名（RFC-0010 的上限）。
+LONGEST_LOCALE = "en-abcdefgh-abcdefgh-abcdefgh-abcde"
+
+
+def test_locale_names_follow_the_grammar() -> None:
+    # RFC-0010：^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$，最长 35 个字符；规范形式是语言小写、两位地区大写、四位文字首字母大写
+    canonical = {
+        "en": "en",
+        "EN": "en",
+        "fil": "fil",
+        "en-US": "en-US",
+        "zh-cn": "zh-CN",
+        "ZH-hant-tw": "zh-Hant-TW",
+        "sr-LATN-rs": "sr-Latn-RS",
+        "es-419": "es-419",
+        "de-de-1996": "de-DE-1996",
+        "EN-us-POSIX": "en-US-posix",
+        LONGEST_LOCALE.upper(): LONGEST_LOCALE,
+    }
+    assert len(LONGEST_LOCALE) == primitives.MAX_LOCALE_NAME_LENGTH == 35
+    for name, expected in canonical.items():
+        assert primitives.is_locale_name(name), name
+        assert primitives.validate_locale_name(name) == expected, name
+    invalid = [
+        "",
+        "e",
+        "engl",
+        "e1-US",
+        "en_US",
+        "en-",
+        "-US",
+        "en--US",
+        "en-U",
+        "en-abcdefghi",
+        "en-US ",
+        "en-US\n",
+        "ｅｎ-US",
+        "中文",
+        "???",
+        "not a locale!!",
+        LONGEST_LOCALE + "f",
+    ]
+    for name in invalid:
+        assert not primitives.is_locale_name(name), name
+        with pytest.raises(FrameworkError) as raised:
+            primitives.validate_locale_name(name)
+        assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT, name
+
+
+def test_catalog_locales_are_validated_and_compared_case_insensitively() -> None:
+    catalog = Catalog(
+        {
+            "ZH-cn": {"orders.missing": "订单 {id} 不存在。"},
+            "en-us": {"orders.missing": "Order {id} is missing.", "orders.total": "Total {amount:N1}."},
+            "zh-hant-tw": {"orders.missing": "訂單 {id} 不存在。"},
+        }
+    )
+    # 区域键按规范形式保存
+    assert list(catalog.locales) == ["zh-CN", "en-US", "zh-Hant-TW"]
+    for locale in ["zh-CN", "zh-cn", "ZH-CN", "Zh-Cn"]:
+        assert catalog.resolve("orders.missing", locale, {"id": 1}) == "订单 1 不存在。", locale
+    assert catalog.resolve("orders.missing", "ZH-HANT-TW", {"id": 1}) == "訂單 1 不存在。"
+    # 声明成 en-us 的默认区域照样是回退的终点；数字符号仍按请求的区域
+    assert catalog.resolve("orders.total", "zh-cn", {"amount": 1234.5}) == "Total 1,234.5."
+    assert catalog.resolve("orders.total", "DE-de", {"amount": 1234.5}) == "Total 1.234,5."
+    assert catalog.resolve("orders.total", "EN-US", {"amount": 0.5}) == "Total 0.5."
+    # 请求的区域名不合文法时不报错（它多半来自外部输入），当作目录里没有、退到 en-US
+    for locale in ["not a locale!!", "", "en_US"]:
+        assert catalog.resolve("orders.missing", locale, {"id": 1}) == "Order 1 is missing.", locale
+    for bad in ["not a locale!!", "", "en_US", "en-US\n", LONGEST_LOCALE + "f"]:
+        with pytest.raises(FrameworkError) as raised:
+            Catalog({bad: {"orders.missing": "x"}})
+        assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT, bad
+    # 只差大小写的两个区域名是同一个区域
+    with pytest.raises(FrameworkError, match="more than once") as raised:
+        Catalog({"zh-CN": {"orders.missing": "x"}, "zh-cn": {"orders.missing": "y"}})
+    assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT
+
+
+@pytest.mark.usefixtures("default_messages")
+def test_the_default_locale_is_validated_and_kept_in_its_canonical_form() -> None:
+    catalog = Catalog({"zh-CN": {"orders.missing": "订单 {id} 不存在。"}})
+    primitives.set_default_messages(catalog, "zh-cn")
+    assert primitives.default_locale() == "zh-CN"
+    assert Error.not_found("ORDERS_NOTFOUND_001", "orders.missing", {"id": 1}).message == "订单 1 不存在。"
+    for bad in ["???", "", "not a locale!!"]:
+        with pytest.raises(FrameworkError) as raised:
+            primitives.set_default_messages(None, bad)
+        assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT, bad
+    # 被拒绝的设置什么都不改：解析器与区域都还是原来的
+    assert primitives.default_locale() == "zh-CN"
+    assert primitives.resolve_message("orders.missing", {"id": 2}) == "订单 2 不存在。"
+
+
 def test_error_wire_encoding() -> None:
     inner = Error.literal("KERNEL_UNEXPECTED_001", "boom")
     error = Error.unexpected("ORDERS_UNEXPECTED_001", "orders.failed", {"id": "o1"}, inner)
@@ -384,6 +479,87 @@ def test_results_cannot_be_uninitialized() -> None:
     assert raised.value.message == "stale"
     assert repr(ok(1)) == "Ok(1)"
     assert repr(fail(Error.literal("ORDERS_CONFLICT_001", "stale"))) == "Fail(ORDERS_CONFLICT_001: stale)"
+
+
+def test_results_hash_like_they_compare() -> None:
+    # 相等的结果散列相同：可以放进集合、作字典的键
+    def missing() -> Error:
+        return Error.not_found("ORDERS_NOTFOUND_001", "orders.missing", {"id": 1})
+
+    assert ok(5) == ok(5)
+    assert hash(ok(5)) == hash(ok(5))
+    assert fail(missing()) == fail(missing())
+    assert hash(fail(missing())) == hash(fail(missing()))
+    assert hash(success()) == hash(success())
+    distinct: set[Result[Any]] = {ok(5), ok(5), ok(6), ok("5"), success(), success(), fail(missing()), fail(missing())}
+    assert len(distinct) == 5
+    assert {ok("a"): 1, fail(missing()): 2}[ok("a")] == 1
+    assert ok(Maybe.some(1)) in {ok(Maybe.some(1))}
+    # 成功值不可散列时与元组一样报 TypeError，相等的比较不受影响
+    with pytest.raises(TypeError):
+        hash(ok([1]))
+    assert ok([1]) == ok([1])
+
+
+def test_results_and_maybes_match_one_branch() -> None:
+    failure = Error.literal("ORDERS_CONFLICT_001", "stale")
+    failed: Result[int] = fail(failure)
+    assert ok(5).match(lambda value: value + 1, lambda error: -1) == 6
+    assert failed.match(lambda value: "ok", lambda error: error.code) == "ORDERS_CONFLICT_001"
+    assert success().match(lambda value: value is UNIT, lambda error: False)
+    # 只求值一个分支
+    calls: list[object] = []
+    ok("x").match(calls.append, calls.append)
+    failed.match(calls.append, calls.append)
+    assert calls == ["x", failure]
+    absent: Maybe[int] = Maybe.none()
+    assert Maybe.some(2).match(lambda value: value * 2, lambda: 0) == 4
+    assert absent.match(lambda value: "some", lambda: "none") == "none"
+    Maybe.some("y").match(calls.append, lambda: calls.append(None))
+    absent.match(calls.append, lambda: calls.append(None))
+    assert calls == ["x", failure, "y", None]
+
+
+def test_failed_results_raise_on_demand() -> None:
+    # raise_if_failed 与 value_or_raise 抛出同样的 FrameworkError：码与消息取自失败原因；成功时什么都不做
+    ok(5).raise_if_failed()
+    success().raise_if_failed()
+    failed: Result[int] = fail(Error.not_found("ORDERS_NOTFOUND_001", "orders.missing", {"id": 1}))
+    with pytest.raises(FrameworkError) as raised:
+        failed.raise_if_failed()
+    assert (raised.value.code, raised.value.message) == ("ORDERS_NOTFOUND_001", "orders.missing (id=1)")
+    with pytest.raises(FrameworkError) as reraised:
+        failed.value_or_raise()
+    assert (reraised.value.code, reraised.value.message) == (raised.value.code, raised.value.message)
+    assert ok(5).value_or_raise() == 5
+
+
+@pytest.mark.parametrize(
+    ("kind", "members", "description"),
+    [
+        (Stability, {"stable": Stability.STABLE, "deprecated": Stability.DEPRECATED}, "stability"),
+        (PipelineStage, {"ingress": PipelineStage.INGRESS, "egress": PipelineStage.EGRESS}, "pipeline stage"),
+        (LifecycleState, {"Declared": LifecycleState.DECLARED, "Failed": LifecycleState.FAILED}, "lifecycle state"),
+    ],
+)
+def test_named_enums_share_their_wire_form(kind: Any, members: dict[str, Any], description: str) -> None:
+    # 三个按名字上线的枚举：str、parse、to_json_value 与 from_json_value 是同一套规则，名字区分大小写
+    assert sorted(str(member) for member in kind) == sorted(member.to_json_value() for member in kind)
+    assert len({str(member) for member in kind}) == len(kind)
+    for name, member in members.items():
+        assert (str(member), member.to_json_value()) == (name, name)
+        assert kind.parse(name) is member
+        assert kind.from_json_value(name) is member
+    for member in kind:
+        assert kind.parse(str(member)) is member
+    for unknown in ["", "unknown", next(iter(members)).swapcase(), next(iter(members)) + "\n", "ſtable"]:
+        assert kind.parse(unknown) is None, unknown
+        with pytest.raises(ValueError, match=f"is not a {description}") as raised:
+            kind.from_json_value(unknown)
+        assert not isinstance(raised.value, FrameworkError)
+    for not_a_name in [None, 0, True, ["stable"]]:
+        with pytest.raises(ValueError, match=re.escape(f"'{not_a_name}' is not a {description}.")):
+            kind.from_json_value(not_a_name)
 
 
 def test_maybe_wire_encoding() -> None:

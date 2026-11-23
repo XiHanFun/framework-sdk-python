@@ -28,7 +28,14 @@ if _MISSING:
         name=_MISSING[0],
     )
 
-from xihan_framework.plugin._host import EXTENSION_TENANT, PERMISSION_INVOKE, PERMISSION_PUBLISH, Host, host_of  # noqa: E402
+from xihan_framework.plugin._host import (  # noqa: E402
+    EXTENSION_TENANT,
+    PERMISSION_INVOKE,
+    PERMISSION_PUBLISH,
+    Host,
+    find_host,
+    host_of,
+)
 from xihan_framework.plugin._lifecycle import SELF_REPORTED_STATES, SERVING_STATES  # noqa: E402
 from xihan_framework.plugin._log import JsonLogHandler, level_name  # noqa: E402
 from xihan_framework.plugin._messages import (  # noqa: E402
@@ -133,6 +140,7 @@ __all__ = [
     "Subscription",
     "SubscriptionHandler",
     "SubscriptionMode",
+    "find_host",
     "host_of",
     "is_loopback_address",
     "is_topic",

@@ -37,6 +37,8 @@ MESSAGE_DEADLINE_EXCEEDED: Final = "kernel.invocation.deadline_exceeded"
 MESSAGE_CANCELLED: Final = "kernel.invocation.cancelled"
 #: 调用开始时截止时间已过的消息键（码同样是 ``KERNEL_TIMEOUT_001``）。
 MESSAGE_DEADLINE_BEFORE_START: Final = "kernel.invocation.deadline_before_start"
+#: 一个上下文按派生携带的值的上限：不同的键的个数（``Context.with_value``）。
+VALUE_CAPACITY: Final = 256
 
 # W3C traceparent 只认版本 00 与小写十六进制（RFC-0003 规则 7，ADR-0235）；其他版本、大写、多余的段都不合法
 _TRACE_PARENT = re.compile(r"00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})")
@@ -188,7 +190,7 @@ class Cancellation:
 
 
 class ItemKey[T]:
-    """对象袋的类型化键：按身份比较，``name`` 只用于调试。"""
+    """对象袋（``set_item``）与按派生携带的值（``with_value``）的类型化键：按身份比较，``name`` 只用于调试。"""
 
     __slots__ = ("_name",)
 
@@ -224,15 +226,19 @@ class _Items:
             return self._values.get(key)
 
 
+# 没有按派生携带的值的上下文共用这一份空表
+_NO_VALUES: Final[Mapping[ItemKey[Any], object]] = MappingProxyType({})
+
+
 class Context:
     """一次调用的上下文（RFC-0003）：不可变，``with_*`` 方法派生新的上下文。
 
-    派生的上下文共享取消信号、截止时间、追踪与对象袋，Baggage 按值复制。截止时间是 UTC 的绝对时刻；``run`` 在
-    截止时间与取消信号下执行一次调用，取消与截止时间只经信号通知，超时与取消翻译成 ``KERNEL_TIMEOUT_001`` /
-    ``KERNEL_CANCELLED_001``。
+    派生的上下文共享取消信号、截止时间、追踪与对象袋，Baggage 按值复制，``with_value`` 带上的值随派生传递。截止时间是
+    UTC 的绝对时刻；``run`` 在截止时间与取消信号下执行一次调用，取消与截止时间只经信号通知，超时与取消翻译成
+    ``KERNEL_TIMEOUT_001`` / ``KERNEL_CANCELLED_001``。
     """
 
-    __slots__ = ("_baggage", "_cancellation", "_deadline", "_items", "_sampled", "_span_id", "_trace_id")
+    __slots__ = ("_baggage", "_cancellation", "_deadline", "_items", "_sampled", "_span_id", "_trace_id", "_values")
 
     def __init__(
         self,
@@ -289,6 +295,7 @@ class Context:
         self._sampled = sampled
         self._baggage: Mapping[str, str] = MappingProxyType(copied)
         self._items = _Items()
+        self._values = _NO_VALUES
 
     @property
     def cancellation(self) -> Cancellation:
@@ -394,6 +401,30 @@ class Context:
         """从对象袋里取一个值；没有时为 ``None``。"""
         return cast(T | None, self._items.get(key))
 
+    def with_value[T](self, key: ItemKey[T], value: T) -> Self:
+        """派生一个多带一个值的上下文：只有它与从它派生的上下文读得到，不写进共享的对象袋，也不跨进程传播。
+
+        对象袋由一次调用的全部派生上下文共享，后写的覆盖先写的；只属于某一段执行的状态用它携带：同一个上下文上嵌套或
+        并发的几段执行各自派生，互不覆盖，例如一次调用里再调另一个操作时各自的当前操作。同一个键再派生是替换，值为
+        ``None`` 等于在派生的上下文里去掉它；不同的键超过 ``VALUE_CAPACITY`` 个抛出 ``FrameworkError``
+        （``PRIMITIVES_VALIDATION_001``）。
+        """
+        values = dict(self._values)
+        if value is None:
+            values.pop(key, None)
+        else:
+            values[key] = value
+        # 表只随不同的键增长，替换与去掉不占新的位置
+        if len(values) > VALUE_CAPACITY:
+            raise FrameworkError(
+                ERROR_CODE_INVALID_ARGUMENT, f"A context cannot carry more than {VALUE_CAPACITY} values."
+            )
+        return self._derive(dict(self._baggage), values=MappingProxyType(values))
+
+    def find_value[T](self, key: ItemKey[T]) -> T | None:
+        """取一个按派生携带的值（``with_value``）；这个上下文没有带它时为 ``None``，不看对象袋。"""
+        return cast(T | None, self._values.get(key))
+
     def cancellation_error(self, now: datetime | None = None) -> Error | None:
         """把截止时间与取消翻译成原语层错误：已过截止时间为 ``KERNEL_TIMEOUT_001``，信号已触发为 ``KERNEL_CANCELLED_001``。
 
@@ -407,7 +438,7 @@ class Context:
         return None
 
     def with_cancellation(self, cancellation: Cancellation) -> Self:
-        """派生一个换了取消信号的上下文；截止时间、追踪、Baggage 与对象袋不变。"""
+        """派生一个换了取消信号的上下文；截止时间、追踪、Baggage、对象袋与携带的值不变。"""
         return self._derive(dict(self._baggage), cancellation)
 
     async def run[T](self, call: Callable[["Context"], Awaitable[Result[T]]]) -> Result[T]:
@@ -468,8 +499,13 @@ class Context:
             f"Context(trace_parent={self.trace_parent!r}, deadline={self._deadline!r}, baggage={dict(self._baggage)!r})"
         )
 
-    def _derive(self, baggage: dict[str, str], cancellation: Cancellation | None = None) -> Self:
-        """派生：换 Baggage（与取消信号），其余共享。"""
+    def _derive(
+        self,
+        baggage: dict[str, str],
+        cancellation: Cancellation | None = None,
+        values: Mapping[ItemKey[Any], object] | None = None,
+    ) -> Self:
+        """派生：换 Baggage（与取消信号、携带的值），其余共享。"""
         derived = object.__new__(type(self))
         derived._cancellation = self._cancellation if cancellation is None else cancellation
         derived._deadline = self._deadline
@@ -478,6 +514,7 @@ class Context:
         derived._sampled = self._sampled
         derived._baggage = MappingProxyType(baggage)
         derived._items = self._items
+        derived._values = self._values if values is None else values
         return derived
 
 

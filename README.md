@@ -22,7 +22,7 @@
 
 </div>
 
-The Python implementation of [XiHan Spec](https://github.com/XiHanFun/framework-spec): the primitives layer, manifests, the invocation context, the pipeline, operation contracts and the out-of-process plugin runtime. Semantics and wire encoding follow the spec, behavior matches the .NET reference implementation, [XiHan.Framework](https://github.com/XiHanFun/XiHan.Framework) (where a result would depend on platform internals, ADR-0236 pins it down in the spec); the spec lives in `spec/` as a submodule, and conformance is verified by the spec repository's vectors.
+The Python implementation of [XiHan Spec](https://github.com/XiHanFun/framework-spec): the primitives layer, manifests, the invocation context, the pipeline, operation contracts and the out-of-process plugin runtime. Semantics and wire encoding follow the spec, behavior matches the .NET reference implementation, [XiHan.Framework](https://github.com/XiHanFun/XiHan.Framework) (where a result would depend on platform internals, ADR-0236 pins it down in the spec); the spec lives in `spec/` as a submodule, and conformance is verified by the spec repository's vectors and its black-box runner: the tests replay the vectors, and the runner drives the example plugin through the plugin runtime as a host would.
 
 ## Modules
 
@@ -30,7 +30,7 @@ The Python implementation of [XiHan Spec](https://github.com/XiHanFun/framework-
 | --- | --- | --- |
 | `primitives` | `Error` and error codes, `Result[T]`, `Maybe[T]`, `TypedId[V]`, lifecycle states, pipeline stages, Baggage keys, message keys and templates, `Catalog`, `FrameworkError` | RFC-0001, RFC-0010 |
 | `manifest` | The model of `xihan.manifest.json`, reading in spec order and character-for-character identical writing | RFC-0002 |
-| `invocation` | The immutable `Context`: deadline, cancellation, W3C tracing, registered Baggage and typed items | RFC-0003 |
+| `invocation` | The immutable `Context`: deadline, cancellation, W3C tracing, registered Baggage, typed items and values carried by derived contexts | RFC-0003 |
 | `pipeline` | The fixed-stage `Builder` with deterministic, printable ordering | RFC-0004 |
 | `operation` | `Contract`, `Registry` and the `Invoker` that runs an operation through the full pipeline (XGI) | RFC-0011 |
 | `plugin` | The out-of-process plugin runtime (`xihan.plugin.v1` on `grpc.aio`) and the host callback client `Host`; needs the extra `plugin` | RFC-0017 |

@@ -69,6 +69,10 @@ class Maybe[T]:
         """把无值转成给定错误的失败。"""
         return fail(error) if self._value is None else ok(self._value)
 
+    def match[U](self, on_some: Callable[[T], U], on_none: Callable[[], U]) -> U:
+        """按有值或无值求值，只调用其中一个分支（RFC-0001 ``Match``）：有值把值交给 ``on_some``，无值调用 ``on_none``。"""
+        return on_none() if self._value is None else on_some(self._value)
+
     def map[U](self, transform: Callable[[T], U]) -> "Maybe[U]":
         """变换有值的 Maybe；无值原样传递，变换结果为 ``None`` 时也是无值。"""
         return _NONE if self._value is None else Maybe.from_optional(transform(self._value))

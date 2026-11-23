@@ -6,10 +6,12 @@ import json
 import logging
 import subprocess
 import sys
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from importlib.resources.abc import Traversable
+from typing import Any, cast
 
 import pytest
 
@@ -42,6 +44,7 @@ from xihan_framework.plugin import (
     Plugin,
     Subscription,
     SubscriptionHandler,
+    find_host,
     host_of,
     is_topic,
     is_whitespace,
@@ -74,6 +77,7 @@ from xihan_framework.plugin._lifecycle import TenantLedger
 from xihan_framework.plugin._runtime import REASON_CONFIGURATION_NOT_OBJECT
 from xihan_framework.plugin.v1 import plugin_pb2 as pb
 from xihan_framework.primitives import (
+    ERROR_CODE_INVALID_ARGUMENT,
     Catalog,
     Error,
     FrameworkError,
@@ -497,6 +501,10 @@ def test_callbacks_are_checked_locally_before_anything_is_sent() -> None:
 def test_the_host_client_exists_only_in_runtime_contexts() -> None:
     with pytest.raises(FrameworkError, match="host client"):
         host_of(Context())
+    # find_host 是不抛出的取法：在运行时之外（测试里直接调处理器）也要能跑的代码用它
+    assert find_host(Context()) is None
+    derived = Context().with_baggage("xihan.tenant", "t1")
+    assert find_host(derived) is None
 
 
 @dataclass(frozen=True)
@@ -577,6 +585,28 @@ def test_catalog_directories_are_read_strictly(tmp_path: Any) -> None:
     (tmp_path / "en-US.json").unlink()
     with pytest.raises(FrameworkError, match="en-US"):
         load_catalog(tmp_path)
+
+
+def test_catalog_files_are_named_after_locales(tmp_path: Any) -> None:
+    # 文件名就是区域名（RFC-0010）：大小写不同的写法归到规范形式，不是区域名的 .json 文件使目录不合法
+    (tmp_path / "EN-us.json").write_text('{"orders.created": "Created {id}."}', encoding="utf-8")
+    (tmp_path / "zh-hant-tw.json").write_text('{"orders.created": "已建立 {id}。"}', encoding="utf-8")
+    catalog = load_catalog(tmp_path)
+    assert sorted(catalog.locales) == ["en-US", "zh-Hant-TW"]
+    assert catalog.resolve("orders.created", "zh-hant-TW", {"id": 1}) == "已建立 1。"
+    assert catalog.resolve("orders.created", "ja-JP", {"id": 1}) == "Created 1."
+    (tmp_path / "notes.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(FrameworkError, match=r"'notes\.json'") as raised:
+        load_catalog(tmp_path)
+    assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT
+    # 只差大小写的两个文件是同一个区域；压缩包里的名字区分大小写，在任何文件系统上都放得下这两个文件
+    archive = tmp_path / "catalog.zip"
+    with zipfile.ZipFile(archive, "w") as written:
+        written.writestr("en-US.json", '{"orders.created": "Created {id}."}')
+        written.writestr("en-us.json", '{"orders.created": "created {id}"}')
+    with zipfile.ZipFile(archive) as opened, pytest.raises(FrameworkError, match="more than one file") as raised:
+        load_catalog(cast(Traversable, zipfile.Path(opened)))
+    assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT
 
 
 def test_logs_are_json_lines_with_the_host_levels() -> None:

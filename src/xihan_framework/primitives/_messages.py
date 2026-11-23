@@ -17,9 +17,13 @@ from xihan_framework.primitives._framework import FrameworkError
 DEFAULT_LOCALE: Final = "en-US"
 #: 消息键的最大长度（RFC-0010「消息键」）。
 MAX_MESSAGE_KEY_LENGTH: Final = 128
+#: 区域名的最大长度（RFC-0010「区域」，.NET 的 ``LocaleName.MaxLength``）。
+MAX_LOCALE_NAME_LENGTH: Final = 35
 
 # 消息键文法 <domain>.<segment>[.<segment>]，首段与后段同形（RFC-0001，2026-10-28 修订后首段可含下划线）
 _MESSAGE_KEY_PATTERN = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+")
+# 区域名文法（RFC-0010「区域」）：2–3 个字母的语言子标签，之后是 0 到多个 2–8 位字母数字的子标签，以 - 连接
+_LOCALE_NAME_PATTERN = re.compile(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*")
 # 占位符名：字母开头的字母、数字与下划线（按名字），或纯数字（按位置）（RFC-0010「模板」）
 _PLACEHOLDER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]*|[0-9]+")
 # 可移植的格式说明符：D、X / x、F、N 加至多两位精度，整串匹配（RFC-0010「模板」，ADR-0236）
@@ -52,6 +56,25 @@ def is_message_key(key: str) -> bool:
 def message_key_domain(key: str) -> str | None:
     """返回消息键的领域段（第一个点之前）；不合法时为 ``None``。"""
     return key.split(".", 1)[0] if is_message_key(key) else None
+
+
+def is_locale_name(locale: str) -> bool:
+    """判断区域名是否符合 ``^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$`` 且不超过 35 个字符，按整串匹配（RFC-0010「区域」）。"""
+    return len(locale) <= MAX_LOCALE_NAME_LENGTH and _LOCALE_NAME_PATTERN.fullmatch(locale) is not None
+
+
+def validate_locale_name(locale: str) -> str:
+    """校验区域名并返回它的规范形式；不合法抛出 ``FrameworkError``（``PRIMITIVES_VALIDATION_001``）。
+
+    规范形式（RFC-0010「区域」，与 .NET 的 ``LocaleName.Normalize`` 相同）：语言子标签小写，两位的地区子标签大写，四位的
+    文字子标签首字母大写，其余子标签小写，如 ``zh-cn`` → ``zh-CN``、``ZH-hant-tw`` → ``zh-Hant-TW``。区域名的比较不区分
+    大小写：两个区域名相同，当且仅当规范形式相同。
+    """
+    if not is_locale_name(locale):
+        raise FrameworkError(
+            ERROR_CODE_INVALID_ARGUMENT, f"The locale '{locale}' must be a BCP 47 name such as '{DEFAULT_LOCALE}'."
+        )
+    return _canonical_locale(locale)
 
 
 def placeholders(template: str) -> list[str]:
@@ -246,6 +269,23 @@ def _symbols(locale: str | None) -> tuple[str, str]:
     return _LOCALE_SYMBOLS.get(locale.translate(_ASCII_LOWER), _INVARIANT_SYMBOLS)
 
 
+def _canonical_locale(locale: str) -> str:
+    """合法区域名的规范大小写；文法只有 ASCII 字母与数字，``lower`` / ``upper`` 不会碰到别的字符。"""
+    language, *rest = locale.split("-")
+    parts = [language.lower()]
+    for part in rest:
+        if len(part) == 2:
+            # 两位是地区子标签
+            parts.append(part.upper())
+        elif len(part) == 4:
+            # 四位是文字子标签（Hant、Latn）
+            parts.append(part[0].upper() + part[1:].lower())
+        else:
+            # 三位数字的地区（419）没有大小写，其余子标签一律小写
+            parts.append(part.lower())
+    return "-".join(parts)
+
+
 def _write_json(value: object, parts: list[str], depth: int) -> None:
     """把模型里的值写成紧凑的 JSON 文本；``depth`` 是这里的容器所在的层，超过 64 层写 ``null``。"""
     model = _model(value)
@@ -298,15 +338,24 @@ class MessageResolver(Protocol):
 class Catalog:
     """一份内存消息目录：区域 → 键 → 模板。
 
-    实现 ``MessageResolver``：请求的区域没有该键时回退到 ``en-US``。构造时复制内容并校验键的文法，之后不可变。
+    实现 ``MessageResolver``：请求的区域没有该键时回退到 ``en-US``。构造时复制内容并校验区域名与键的文法，区域名按规范
+    形式保存、查找时不区分大小写（RFC-0010「区域」），之后不可变。
     """
 
     __slots__ = ("_locales",)
 
     def __init__(self, locales: Mapping[str, Mapping[str, str]]) -> None:
-        """用区域到模板表的映射创建；键不合文法抛出 ``FrameworkError``（``PRIMITIVES_VALIDATION_001``）。"""
+        """用区域到模板表的映射创建。
+
+        区域名或键不合文法、两个区域名只差大小写（是同一个区域）时抛出 ``FrameworkError``（``PRIMITIVES_VALIDATION_001``）。
+        """
         copied: dict[str, Mapping[str, str]] = {}
-        for locale, templates in locales.items():
+        for name, templates in locales.items():
+            locale = validate_locale_name(name)
+            if locale in copied:
+                raise FrameworkError(
+                    ERROR_CODE_INVALID_ARGUMENT, f"The catalog lists the locale '{locale}' more than once."
+                )
             for key in templates:
                 if not is_message_key(key):
                     raise FrameworkError(
@@ -318,13 +367,21 @@ class Catalog:
 
     @property
     def locales(self) -> Mapping[str, Mapping[str, str]]:
-        """区域到模板表的只读映射。"""
+        """区域（规范形式）到模板表的只读映射。"""
         return self._locales
 
     def resolve(self, key: str, locale: str, arguments: Mapping[str, object] | None) -> str | None:
-        """解析消息键：先找请求的区域，没有再找 ``en-US``；按请求的区域严格格式化，占位符缺值时为 ``None``（RFC-0010「解析」）。"""
-        template = self._locales.get(locale, {}).get(key)
-        if template is None and locale != DEFAULT_LOCALE:
+        """解析消息键：先找请求的区域，没有再找 ``en-US``；按请求的区域严格格式化，占位符缺值时为 ``None``（RFC-0010「解析」）。
+
+        请求的区域名不区分大小写。它多半来自外部输入（Baggage ``xihan.locale``），不合文法时不报错，当作目录里没有这个
+        区域、退到 ``en-US``（RFC-0010「错误」）。
+        """
+        # 目录里的键都是规范形式：原样命中就是它，没命中再把请求的区域名归一后找一次
+        templates = self._locales.get(locale)
+        if templates is None and is_locale_name(locale):
+            templates = self._locales.get(_canonical_locale(locale))
+        template = None if templates is None else templates.get(key)
+        if template is None:
             template = self._locales.get(DEFAULT_LOCALE, {}).get(key)
         return None if template is None else try_format_message(template, arguments, locale=locale)
 
@@ -338,11 +395,14 @@ _defaults: tuple[MessageResolver | None, str] = (None, DEFAULT_LOCALE)
 def set_default_messages(resolver: MessageResolver | None, locale: str | None = None) -> None:
     """设置进程默认的消息解析器与区域；``locale`` 为 ``None`` 时保留原区域。
 
-    ``Error.message`` 在没有已解析文案时用它解析消息键。
+    ``Error.message`` 在没有已解析文案时用它解析消息键。区域名不合文法是编程错误，抛出 ``FrameworkError``
+    （``PRIMITIVES_VALIDATION_001``），解析器与区域都不变；合法的按规范形式保存（``zh-cn`` 存成 ``zh-CN``）。
     """
     global _defaults
+    # 先校验再进锁：不合法的区域名什么都不改
+    chosen = None if locale is None else validate_locale_name(locale)
     with _defaults_lock:
-        _defaults = (resolver, _defaults[1] if locale is None else locale)
+        _defaults = (resolver, _defaults[1] if chosen is None else chosen)
 
 
 def default_locale() -> str:

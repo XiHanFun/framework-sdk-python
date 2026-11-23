@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, ClassVar, Final, Never, final
 
 from xihan_framework._json import JsonValue, dumps, parse
 from xihan_framework.primitives._error import Error
-from xihan_framework.primitives._error_code import ERROR_CODE_INVALID_ARGUMENT
+from xihan_framework.primitives._error_code import ERROR_CODE_INVALID_ARGUMENT, invalid_argument
 from xihan_framework.primitives._framework import FrameworkError
 
 if TYPE_CHECKING:
@@ -94,10 +94,27 @@ class Result[T]:
 
     def value_or_raise(self) -> T:
         """返回成功值；失败时抛出 ``FrameworkError``，码与消息取自失败原因。"""
-        if self._error is not None:
-            raise FrameworkError(self._error.code, self._error.message)
+        self.raise_if_failed()
         assert self._value is not None
         return self._value
+
+    def raise_if_failed(self) -> None:
+        """失败时抛出 ``FrameworkError``，码与消息取自失败原因；成功时什么都不做（RFC-0001 ``ThrowIfFailure``）。
+
+        给必须成功才能继续的地方用（启动、配置）；业务里的可恢复失败照常把结果返回去，不抛出。
+        """
+        if self._error is not None:
+            raise FrameworkError(self._error.code, self._error.message)
+
+    def match[U](self, on_ok: Callable[[T], U], on_failed: Callable[[Error], U]) -> U:
+        """按成功或失败求值，只调用其中一个分支（RFC-0001 ``Match``）：成功把值交给 ``on_ok``，失败把错误交给 ``on_failed``。
+
+        没有值的成功（``success()``）交给 ``on_ok`` 的是 ``UNIT``。
+        """
+        if self._error is not None:
+            return on_failed(self._error)
+        assert self._value is not None
+        return on_ok(self._value)
 
     def unit(self) -> "Result[Unit]":
         """丢掉值，只保留成功与否。"""
@@ -149,9 +166,9 @@ class Result[T]:
         if error is not None:
             return fail(error)
         if "value" not in members:
-            raise _wire_error("A successful result on the wire needs a 'value'.")
+            raise invalid_argument("A successful result on the wire needs a 'value'.")
         if members["value"] is None:
-            raise _wire_error("The value of a successful result on the wire must not be null.")
+            raise invalid_argument("The value of a successful result on the wire must not be null.")
         return ok(decode_value(members["value"]))
 
     @staticmethod
@@ -161,7 +178,7 @@ class Result[T]:
         if error is not None:
             return fail(error)
         if "value" in members:
-            raise _wire_error("A successful result without a value must not carry a 'value'.")
+            raise invalid_argument("A successful result without a value must not carry a 'value'.")
         return success()
 
     @staticmethod
@@ -173,7 +190,7 @@ class Result[T]:
         if error is not None:
             return fail(error)
         if "value" not in members:
-            raise _wire_error("A successful result on the wire needs a 'value'.")
+            raise invalid_argument("A successful result on the wire needs a 'value'.")
         return ok(Maybe.from_json_value(members["value"], decode_value))
 
     @staticmethod
@@ -203,7 +220,9 @@ class Result[T]:
             return NotImplemented
         return self._error == other._error and self._value == other._value
 
-    __hash__ = None  # type: ignore[assignment]
+    def __hash__(self) -> int:
+        """按错误与值散列，与相等的比较一致；成功值不可散列时与元组一样抛出 ``TypeError``。"""
+        return hash((Result, self._error, self._value))
 
 
 def ok[T](value: T) -> Result[T]:
@@ -230,18 +249,18 @@ def success() -> Result[Unit]:
 def _read(value: JsonValue) -> tuple[Mapping[str, JsonValue], Error | None]:
     """三种结果共用的读取：核对 ``ok``，成功不带 ``error``、失败带 ``error`` 不带 ``value``，失败时还原出错误。"""
     if not isinstance(value, Mapping):
-        raise _wire_error("A result on the wire must be a JSON object.")
+        raise invalid_argument("A result on the wire must be a JSON object.")
     succeeded = value.get("ok")
     if not isinstance(succeeded, bool):
-        raise _wire_error("A result on the wire needs a boolean 'ok'.")
+        raise invalid_argument("A result on the wire needs a boolean 'ok'.")
     if succeeded:
         if "error" in value:
-            raise _wire_error("A successful result on the wire must not carry an 'error'.")
+            raise invalid_argument("A successful result on the wire must not carry an 'error'.")
         return value, None
     if "value" in value:
-        raise _wire_error("A failed result on the wire must not carry a 'value'.")
+        raise invalid_argument("A failed result on the wire must not carry a 'value'.")
     if value.get("error") is None:
-        raise _wire_error("A failed result on the wire needs an error.")
+        raise invalid_argument("A failed result on the wire needs an error.")
     return value, Error.from_json_value(value["error"])
 
 
@@ -250,9 +269,4 @@ def _parse(text: str | bytes) -> JsonValue:
     try:
         return parse(text)
     except ValueError as error:
-        raise _wire_error("The result is not valid JSON.") from error
-
-
-def _wire_error(message: str) -> FrameworkError:
-    """线上编码不合法的配置错误（``PRIMITIVES_VALIDATION_001``）。"""
-    return FrameworkError(ERROR_CODE_INVALID_ARGUMENT, message)
+        raise invalid_argument("The result is not valid JSON.") from error

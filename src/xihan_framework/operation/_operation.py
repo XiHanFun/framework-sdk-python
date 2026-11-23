@@ -1,10 +1,10 @@
 """操作契约与 XGI 消息（RFC-0011）。"""
 
 import logging
-import re
 import threading
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import KW_ONLY, dataclass
+from enum import StrEnum
 from typing import Any, Final, cast
 
 from xihan_framework._codec import DecodeError, compile_decoder, encode
@@ -23,6 +23,7 @@ from xihan_framework.primitives import (
     fail,
     success,
 )
+from xihan_framework.primitives._operation_id import is_operation_id
 
 #: 操作未登记。
 ERROR_CODE_NOT_FOUND: Final = "KERNEL_NOTFOUND_001"
@@ -64,29 +65,48 @@ DEADLINE_MIDDLEWARE: Final = "DeadlineMiddleware"
 #: Validate 阶段的内置步骤：原始调用在这里把载荷解码成请求，类型化调用跳过。
 VALIDATION_MIDDLEWARE: Final = "ValidationMiddleware"
 
-# 暴露的协议名
-EXPOSE_HTTP: Final = "http"
-EXPOSE_GRPC: Final = "grpc"
-EXPOSE_MCP: Final = "mcp"
-EXPOSE_COMMAND_LINE: Final = "commandline"
 
-# 操作 ID 文法 <resource>.<verb>（conventions/operation-ids.md）
-_ID = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
+class Expose(StrEnum):
+    """操作暴露给哪个协议（RFC-0011「契约」「协议映射」）：五个协议，值是插件协议 ``OperationDeclaration.expose`` 里的名字。
+
+    协议适配器按它决定是否发布一个操作；成员是字符串，等于各自的名字（``Expose.HTTP == "http"``）。
+    """
+
+    #: HTTP 路由。
+    HTTP = "http"
+    #: gRPC 方法。
+    GRPC = "grpc"
+    #: MCP tool。
+    MCP = "mcp"
+    #: 命令行。
+    COMMAND_LINE = "commandline"
+    #: ``ai.tools@1`` 目录里的模型工具（RFC-0022）。
+    AI = "ai"
+
+
+# 早于 Expose 就有的协议名常量：各是对应成员的别名，保留给已有的代码
+EXPOSE_HTTP: Final = Expose.HTTP
+EXPOSE_GRPC: Final = Expose.GRPC
+EXPOSE_MCP: Final = Expose.MCP
+EXPOSE_COMMAND_LINE: Final = Expose.COMMAND_LINE
+EXPOSE_AI: Final = Expose.AI
 
 type Handler[Req, Res] = Callable[[Context, Req], Coroutine[Any, Any, Result[Res]]]
 """处理一个操作的异步函数：可恢复失败返回失败结果，不抛异常。"""
 
 
 def is_id(id: str) -> bool:
-    """判断操作 ID 是否符合 ``<resource>.<verb>``。"""
-    return _ID.fullmatch(id) is not None
+    """判断操作 ID 是否符合 ``<resource>.<verb>``（conventions/operation-ids.md）；清单的 ``contributes.operations`` 用同一个文法。"""
+    return is_operation_id(id)
 
 
 @dataclass(frozen=True, slots=True)
 class Contract:
     """操作契约：ID、稳定性、暴露的协议与授权要求（``permission`` 与 ``policy`` 二选一）。
 
-    构造只收 ``id``，其余字段以关键字给出；ID 不合文法、授权要求冲突或为空在构造时即抛出 ``FrameworkError``。
+    构造只收 ``id``，其余字段以关键字给出；ID 不合文法、``expose`` 里有五个协议之外的名字、授权要求冲突或为空在构造时即
+    抛出 ``FrameworkError``。``expose`` 收 ``Expose`` 成员或它们的名字（``"http"``），契约里一律存成成员；缺省为空，即不
+    对外发布。
     """
 
     id: str
@@ -97,7 +117,7 @@ class Contract:
     policy: str | None = None
 
     def __post_init__(self) -> None:
-        """校验并把 ``expose`` 固定成元组。"""
+        """校验并把 ``expose`` 固定成 ``Expose`` 成员的元组。"""
         if not is_id(self.id):
             raise FrameworkError(
                 ERROR_CODE_INVALID_ARGUMENT, f"The operation ID '{self.id}' must match <resource>.<verb>."
@@ -110,8 +130,28 @@ class Contract:
             raise FrameworkError(
                 ERROR_CODE_INVALID_ARGUMENT, f"The permission or policy of the operation '{self.id}' must not be empty."
             )
-        if isinstance(self.expose, list):
-            object.__setattr__(self, "expose", tuple(self.expose))
+        object.__setattr__(self, "expose", _protocols(self.id, self.expose))
+
+
+def _protocols(id: str, expose: object) -> tuple[Expose, ...]:
+    """把契约的 ``expose`` 固定成 ``Expose`` 成员的元组；不是一组协议、或有五个协议之外的名字时抛出 ``FrameworkError``。"""
+    # 字符串也能迭代：逐个字符去认只会报出一个莫名其妙的名字，所以单个字符串（含单个成员）直接拒绝
+    if isinstance(expose, str) or not isinstance(expose, Iterable):
+        raise FrameworkError(
+            ERROR_CODE_INVALID_ARGUMENT,
+            f"The 'expose' of the operation '{id}' must be a tuple of protocols, such as (Expose.HTTP,).",
+        )
+    protocols: list[Expose] = []
+    for protocol in expose:
+        try:
+            protocols.append(Expose(protocol))
+        except ValueError as error:
+            known = ", ".join(f"'{member}'" for member in Expose)
+            raise FrameworkError(
+                ERROR_CODE_INVALID_ARGUMENT,
+                f"The operation '{id}' cannot be exposed to '{protocol}': the protocols are {known}.",
+            ) from error
+    return tuple(protocols)
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,45 +358,79 @@ _logger = logging.getLogger("xihan_framework.operation")
 
 @dataclass(frozen=True, slots=True)
 class _Box:
-    """对象袋里的请求或响应对象；包一层是为了与“还没有”区分开。"""
+    """调用状态里的请求或响应对象；包一层是为了与“还没有”区分开。"""
 
     value: object
 
 
-# 上下文对象袋里的键；只在本模块里写入
-_DESCRIPTOR: Final = ItemKey[Descriptor]("xihan.operation.descriptor")
-_REQUEST: Final = ItemKey[Request]("xihan.operation.request")
-_DECODED: Final = ItemKey[_Box | None]("xihan.operation.decoded")
-_PRODUCED: Final = ItemKey[_Box | None]("xihan.operation.produced")
-_RESPONSE: Final = ItemKey[bytes | None]("xihan.operation.response")
-_TERMINAL: Final = ItemKey[Step | None]("xihan.operation.terminal")
+class _Invocation:
+    """一次操作调用的状态：描述、请求与类型化调用的终点，以及途中写下的解码结果、响应对象与编码后的载荷。
+
+    每次调用新建一个，随派生的上下文交给中间件与处理器（``Context.with_value``），不逐项放进共享的对象袋：同一个上下文上
+    嵌套或并发的调用各有各的状态，互不覆盖。途中的字段只由这次调用自己的管道写入，每次都是整体换一个引用，处理器把
+    上下文交给别的线程去读也不需要锁。
+    """
+
+    __slots__ = ("decoded", "descriptor", "payload", "produced", "request", "terminal")
+
+    def __init__(self, descriptor: Descriptor, request: Request, decoded: _Box | None) -> None:
+        """用描述与请求创建；``decoded`` 是类型化调用传入的请求对象，原始调用为 ``None``、到 Validate 阶段才解码。"""
+        self.descriptor = descriptor
+        self.request = request
+        self.decoded = decoded
+        # 处理器成功返回的响应对象，编码之前
+        self.produced: _Box | None = None
+        # XGI 入口在管道结束之后编码出的载荷
+        self.payload: bytes | None = None
+        # 类型化调用的终点；原始调用没有，由管道的终点按描述执行
+        self.terminal: Step | None = None
+
+
+# 调用状态的键，只在本模块里写入：管道里的上下文按派生携带它（with_value）；对象袋里另记最近进入或结束的那次调用，
+# 给没有携带它的上下文读，也就是调用方传给调用器的那个（调用返回之后读响应载荷）
+_INVOCATION: Final = ItemKey[_Invocation]("xihan.operation.invocation")
+
+
+def _invocation_of(ctx: Context) -> _Invocation | None:
+    """上下文所在的调用的状态：先取它按派生携带的；没有携带时取对象袋里记的最近一次，都没有为 ``None``。"""
+    invocation = ctx.find_value(_INVOCATION)
+    return ctx.find_item(_INVOCATION) if invocation is None else invocation
 
 
 def current(ctx: Context) -> Descriptor | None:
-    """当前调用的操作描述（管道里的中间件用）。"""
-    return ctx.find_item(_DESCRIPTOR)
+    """当前调用的操作描述（管道里的中间件用）。
+
+    中间件与处理器拿到的上下文携带所在调用的状态，同一个上下文上嵌套或并发的调用互不影响：处理器里再调另一个操作，
+    返回之后外层读到的仍是外层的操作。没有携带状态的上下文（调用方传给调用器的那个）读到的是它的对象袋上最近进入或
+    结束的那次调用，供调用返回之后读取；没有调用过为 ``None``。``request_of``、``decoded_request_of``、``response_of``
+    与 ``response_payload_of`` 按同样的规则取。
+    """
+    invocation = _invocation_of(ctx)
+    return None if invocation is None else invocation.descriptor
 
 
 def request_of(ctx: Context) -> Request | None:
     """当前调用的 XGI 请求；类型化调用的请求只有 ID、没有载荷。"""
-    return ctx.find_item(_REQUEST)
+    invocation = _invocation_of(ctx)
+    return None if invocation is None else invocation.request
 
 
 def decoded_request_of(ctx: Context) -> object | None:
     """解码好的请求对象（RFC-0011 规则 3）：原始调用在 Validate 阶段解码之后才有，类型化调用是传入的请求对象。"""
-    decoded = ctx.find_item(_DECODED)
-    return None if decoded is None else decoded.value
+    invocation = _invocation_of(ctx)
+    return None if invocation is None or invocation.decoded is None else invocation.decoded.value
 
 
 def response_of(ctx: Context) -> object | None:
     """执行成功的响应对象（RFC-0011 规则 3）：处理器返回之后才有，是编码之前的对象，管道里的中间件看到的就是它。"""
-    produced = ctx.find_item(_PRODUCED)
-    return None if produced is None else produced.value
+    invocation = _invocation_of(ctx)
+    return None if invocation is None or invocation.produced is None else invocation.produced.value
 
 
 def response_payload_of(ctx: Context) -> bytes | None:
-    """XGI 入口在管道结束之后编码的响应载荷（成功时）；管道里还没有它。"""
-    return ctx.find_item(_RESPONSE)
+    """XGI 入口在管道结束之后编码的响应载荷（成功时）；管道里还没有它，调用返回之后在调用方的上下文上读。"""
+    invocation = _invocation_of(ctx)
+    return None if invocation is None else invocation.payload
 
 
 class Invoker:
@@ -376,8 +450,11 @@ class Invoker:
 
     进入管道之前只核对未登记（``KERNEL_NOTFOUND_001``）与类型化调用的类型不符（``KERNEL_VALIDATION_002``），按这个顺序。
     XGI 入口在管道结束之后才把响应对象编码成载荷，中间件看到的是编码之前的对象（``response_of``）；写不出时以
-    ``kernel.invocation.unhandled_exception`` 结束（规则 10 的「编码」）。操作描述、请求与响应放在上下文的对象袋里，
-    派生上下文共享对象袋，所以并发的调用各用自己的上下文。
+    ``kernel.invocation.unhandled_exception`` 结束（规则 10 的「编码」）。
+
+    每次调用的状态（操作描述、请求与响应）随派生的上下文交给中间件与处理器，不逐项放进共享的对象袋：同一个上下文上
+    嵌套的调用（处理器或中间件里再调另一个操作）与并发的调用（``asyncio.gather``）各有各的状态。管道的终点只执行上下文
+    携带的那次调用，所以中间件往下传的必须是它拿到的上下文或由它派生的上下文。
     """
 
     __slots__ = ("_pipeline", "_registry", "_step")
@@ -424,17 +501,15 @@ class Invoker:
         descriptor = self._registry.find(request.id)
         if descriptor is None:
             return Response(fail(_not_found(request.id)))
-        # 同一个上下文上先后的调用共享对象袋：清掉上一次的请求、响应与类型化终点，免得短路的调用读到旧值
-        self._enter(ctx, descriptor, request, None, None)
-        outcome = await self._step(ctx)
+        invocation = _Invocation(descriptor, request, None)
+        outcome = await self._run(ctx, invocation)
         if outcome.is_failed:
             return Response(outcome)
-        produced = ctx.find_item(_PRODUCED)
-        if produced is None:
+        if invocation.produced is None:
             # 管道成功结束却没有响应：某个中间件以成功短路、handle 没有执行（RFC-0011 规则 9），不返回成功的空载荷
             return Response(fail(_no_response(request.id)))
-        response = descriptor._encode_response(produced.value)
-        ctx.set_item(_RESPONSE, response.payload)
+        response = descriptor._encode_response(invocation.produced.value)
+        invocation.payload = response.payload
         return response
 
     async def invoke_typed[Req, Res](
@@ -452,36 +527,35 @@ class Invoker:
             return fail(Error.validation(ERROR_CODE_TYPE_MISMATCH, MESSAGE_TYPE_MISMATCH, {"id": id}))
         handler = cast(Handler[Req, Res], descriptor._handler)
         results: list[Result[Res]] = []
+        invocation = _Invocation(descriptor, Request(id), _Box(request))
 
         async def terminal(ctx: Context) -> Result[Unit]:
             result = await handler(ctx, request)
             results.append(result)
             if result.error is None:
-                ctx.set_item(_PRODUCED, _Box(result.value))
+                invocation.produced = _Box(result.value)
             return result.unit()
 
-        self._enter(ctx, descriptor, Request(id), _Box(request), terminal)
-        try:
-            outcome = await self._step(ctx)
-        finally:
-            ctx.set_item(_TERMINAL, None)
+        invocation.terminal = terminal
+        outcome = await self._run(ctx, invocation)
         if outcome.error is not None:
             return fail(outcome.error)
         if not results:
             return fail(_no_response(id))
         return results[0]
 
-    @staticmethod
-    def _enter(
-        ctx: Context, descriptor: Descriptor, request: Request, decoded: _Box | None, terminal: Step | None
-    ) -> None:
-        """把这次调用的描述、请求与终点放进对象袋，清掉上一次的解码结果与响应。"""
-        ctx.set_item(_DESCRIPTOR, descriptor)
-        ctx.set_item(_REQUEST, request)
-        ctx.set_item(_DECODED, decoded)
-        ctx.set_item(_PRODUCED, None)
-        ctx.set_item(_RESPONSE, None)
-        ctx.set_item(_TERMINAL, terminal)
+    async def _run(self, ctx: Context, invocation: _Invocation) -> Result[Unit]:
+        """让一次调用经过管道：它的状态随派生的上下文往下传，同一个上下文上嵌套或并发的调用互不覆盖。"""
+        scoped = ctx.with_value(_INVOCATION, invocation)
+        # 对象袋里的这一份只给没有携带状态的上下文读（调用方手里的那个）：进入时记下，途中读到的是这次调用
+        ctx.set_item(_INVOCATION, invocation)
+        try:
+            return await self._step(scoped)
+        finally:
+            # 结束时再记一次：嵌套在里面的调用先结束，调用方在返回之后读到的是自己这一次，而不是里面那次
+            ctx.set_item(_INVOCATION, invocation)
+            # 终点只在管道里用：放掉它，连同它闭包里的请求对象与处理器
+            invocation.terminal = None
 
 
 async def _observe(ctx: Context, next_step: Step) -> Result[Unit]:
@@ -504,37 +578,38 @@ async def _deadline(ctx: Context, next_step: Step) -> Result[Unit]:
 
 
 async def _validate(ctx: Context, next_step: Step) -> Result[Unit]:
-    """Validate 阶段的内置步骤：原始调用解码载荷并放进对象袋，失败即结束；类型化调用已经有请求对象，跳过。"""
-    descriptor = current(ctx)
-    if descriptor is not None and ctx.find_item(_DECODED) is None:
-        request = request_of(ctx)
-        value, invalid = descriptor.decode(b"" if request is None else request.payload)
+    """Validate 阶段的内置步骤：原始调用解码载荷并记进调用状态，失败即结束；类型化调用已经有请求对象，跳过。"""
+    # 只认上下文携带的状态，不看对象袋里最近的那次：那可能是同一个上下文上的另一次调用
+    invocation = ctx.find_value(_INVOCATION)
+    if invocation is not None and invocation.decoded is None:
+        value, invalid = invocation.descriptor.decode(invocation.request.payload)
         if invalid is not None:
             return fail(invalid)
-        ctx.set_item(_DECODED, _Box(value))
+        invocation.decoded = _Box(value)
     return await next_step(ctx)
 
 
 async def _dispatch(ctx: Context) -> Result[Unit]:
-    """管道的终点：类型化调用执行它放进来的终点，否则以解码好的请求执行当前操作，把响应对象放进对象袋，不编码。"""
-    terminal = ctx.find_item(_TERMINAL)
-    if terminal is not None:
-        return await terminal(ctx)
-    descriptor = current(ctx)
-    if descriptor is None:
+    """管道的终点：类型化调用执行它带来的终点，否则以解码好的请求执行当前操作，把响应对象记进调用状态，不编码。"""
+    # 与 Validate 阶段一样只认上下文携带的状态：对象袋里最近的那次可能是别的调用，执行它就串了操作
+    invocation = ctx.find_value(_INVOCATION)
+    if invocation is None:
+        # 中间件往下传的不是它拿到的上下文或由它派生的上下文：没有可执行的操作
         return fail(Error.not_found(ERROR_CODE_NOT_FOUND, MESSAGE_NOT_FOUND))
-    decoded = ctx.find_item(_DECODED)
+    if invocation.terminal is not None:
+        return await invocation.terminal(ctx)
+    descriptor = invocation.descriptor
+    decoded = invocation.decoded
     if decoded is None:
         # Validate 阶段的内置步骤总会先解码；没有解码结果时同样按规则 2 解码，不让处理器拿到未解码的载荷
-        request = request_of(ctx)
-        value, invalid = descriptor.decode(b"" if request is None else request.payload)
+        value, invalid = descriptor.decode(invocation.request.payload)
         if invalid is not None:
             return fail(invalid)
         decoded = _Box(value)
     result = await descriptor._handler(ctx, decoded.value)
     if result.error is not None:
         return fail(result.error)
-    ctx.set_item(_PRODUCED, _Box(result.value))
+    invocation.produced = _Box(result.value)
     return success()
 
 

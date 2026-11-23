@@ -21,6 +21,8 @@ from xihan_framework.primitives import (
     ok,
     success,
 )
+from xihan_framework.primitives._error_code import invalid_argument
+from xihan_framework.primitives._operation_id import is_operation_id
 
 #: 清单文件名。
 FILE_NAME: Final = "xihan.manifest.json"
@@ -54,18 +56,19 @@ MESSAGE_DUPLICATE_BINDINGS: Final = "primitives.manifest.duplicate_bindings"
 
 # 文法与 spec/manifest/manifest.schema.json 一致；一律 fullmatch，Python 的 $ 会放过结尾的换行（RFC-0001「文法的匹配」）
 _MANIFEST_ID = re.compile(r"xihan\.[a-z][a-z0-9]*\.[a-z][a-z0-9-]*")
-_CAPABILITY_ID = re.compile(r"[a-z][a-z0-9]*\.[a-z][a-z0-9-]*")
+# 能力 ID 与接口版本的文法各写一处：能力声明 id@version 与依赖 id@[^]version[?] 由它们拼出来
+_CAPABILITY_ID_TEXT: Final = r"[a-z][a-z0-9]*\.[a-z][a-z0-9-]*"
+_VERSION_TEXT: Final = r"[1-9][0-9]*"
+_CAPABILITY_ID = re.compile(_CAPABILITY_ID_TEXT)
 _SEMVER = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?")
-_VERSION = re.compile(r"[1-9][0-9]*")
-_REQUIREMENT = re.compile(r"([a-z][a-z0-9]*\.[a-z][a-z0-9-]*)@\^?([1-9][0-9]*)(\??)")
-_DECLARATION = re.compile(r"([a-z][a-z0-9]*\.[a-z][a-z0-9-]*)@([1-9][0-9]*)")
+_VERSION = re.compile(_VERSION_TEXT)
+_REQUIREMENT = re.compile(rf"({_CAPABILITY_ID_TEXT})@\^?({_VERSION_TEXT})(\??)")
+_DECLARATION = re.compile(rf"({_CAPABILITY_ID_TEXT})@({_VERSION_TEXT})")
 _ACTIVATION = re.compile(r"onStartup|onOperation:[a-z0-9.*-]+|onEvent:[a-z0-9.*-]+")
 # .+ 不跨换行：Python 的 . 与 .NET 一样不匹配 \n
 _PERMISSION = re.compile(r"(?:net\.outbound|fs\.read|fs\.write|capability):.+")
 _BINDING_NAME = re.compile(r"[a-z][a-z0-9-]*")
 _BINDING_TYPE = re.compile(r"[a-z]+(?::[a-z]+)?")
-# 操作 ID 文法（RFC-0011、conventions/operation-ids.md）：连字符只在字母数字之间，不开头、不结尾、不连写
-_OPERATION = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
 _SECTION = re.compile(r"XiHan:[A-Z][A-Za-z0-9]*(?::[A-Z][A-Za-z0-9]*)*")
 _HEALTH = re.compile(r"[a-z][a-z0-9.-]*")
 _PERMISSION_CODE = re.compile(r"[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+")
@@ -398,7 +401,8 @@ def _check_contributions(contributions: Contributions, id: str) -> None:
         if not isinstance(contribution.stage, PipelineStage):
             raise _invalid(f"the pipeline contribution '{contribution.middleware}' of '{id}' has an unknown stage")
     for operation in contributions.operations:
-        if _OPERATION.fullmatch(operation) is None:
+        # 与操作契约同一个文法（RFC-0011、conventions/operation-ids.md）
+        if not is_operation_id(operation):
             raise _invalid(f"the operation '{operation}' of '{id}' must match <resource>.<verb>")
     config = contributions.config
     if config is not None and _SECTION.fullmatch(config.section) is None:
@@ -436,7 +440,7 @@ def _has_duplicates(values: Iterable[str]) -> bool:
 
 def _invalid(message: str) -> FrameworkError:
     """清单字段格式不合的编程错误，句末加句号。"""
-    return FrameworkError(ERROR_CODE_INVALID_ARGUMENT, message + ".")
+    return invalid_argument(message + ".")
 
 
 def _freeze_sequences(instance: object) -> None:
@@ -589,7 +593,7 @@ _ROOT: Final = _Object(
                         ("middleware", "stage"),
                     ),
                 ),
-                "operations": _list(_pattern(_OPERATION)),
+                "operations": _list(_text(is_operation_id)),
                 "config": _shape({"section": _pattern(_SECTION), "schema": _STRING}, ("section",)),
                 "permissions": _list(_pattern(_PERMISSION_CODE), unique=True),
                 "health": _list(_pattern(_HEALTH)),

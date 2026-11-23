@@ -14,6 +14,7 @@ from xihan_framework.invocation import (
     MESSAGE_CANCELLED,
     MESSAGE_DEADLINE_BEFORE_START,
     MESSAGE_DEADLINE_EXCEEDED,
+    VALUE_CAPACITY,
     Cancellation,
     Context,
     ItemKey,
@@ -87,6 +88,45 @@ def test_new_generates_trace_and_keeps_baggage() -> None:
     assert scoped.cancellation is other
     assert (scoped.correlation, scoped.trace_id, scoped.find_item(key)) == ("c1", ctx.trace_id, 1)
     assert derived.cancellation is ctx.cancellation
+
+
+def test_values_travel_with_derived_contexts_only() -> None:
+    key = ItemKey[str | None]("operation")
+    ctx = Context(baggage={BAGGAGE_TENANT: "t1"})
+    outer = ctx.with_value(key, "outer")
+    inner = outer.with_value(key, "inner")
+    assert (ctx.find_value(key), outer.find_value(key), inner.find_value(key)) == (None, "outer", "inner")
+    assert (outer.tenant, outer.trace_parent, outer.cancellation) == ("t1", ctx.trace_parent, ctx.cancellation)
+    # 值随之后的派生传递；对象袋照旧由全部派生的上下文共享，值不在对象袋里
+    derived = (
+        outer.with_baggage(BAGGAGE_CORRELATION, "c1").with_cancellation(Cancellation()).without_unregistered_baggage()
+    )
+    assert derived.find_value(key) == "outer"
+    item = ItemKey[int]("item")
+    inner.set_item(item, 1)
+    assert (ctx.find_item(item), outer.find_value(item), ctx.find_item(key)) == (1, None, None)
+    assert outer.find_value(ItemKey[str | None]("operation")) is None, "keys compare by identity"
+    # None 等于在派生的上下文里去掉这个值，原来的上下文不变
+    assert inner.with_value(key, None).find_value(key) is None
+    assert inner.find_value(key) == "inner"
+    seen: list[str | None] = []
+
+    async def read(downstream: Context) -> Result[Unit]:
+        seen.append(downstream.find_value(key))
+        return success()
+
+    assert asyncio.run(outer.run(read)).is_ok
+    assert seen == ["outer"], "the context handed to the call carries the values"
+    # 不同的键有上限，同一个键再派生是替换
+    full = ctx
+    keys = [ItemKey[int](f"key{index}") for index in range(VALUE_CAPACITY)]
+    for index, numbered in enumerate(keys):
+        full = full.with_value(numbered, index)
+    assert full.with_value(keys[0], -1).find_value(keys[0]) == -1
+    assert full.find_value(keys[-1]) == VALUE_CAPACITY - 1 == 255
+    with pytest.raises(FrameworkError) as raised:
+        full.with_value(ItemKey[int]("overflow"), 0)
+    assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT
 
 
 def test_the_deadline_fires_the_signal_and_translates() -> None:

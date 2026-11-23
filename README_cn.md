@@ -22,7 +22,7 @@
 
 </div>
 
-[XiHan Spec](https://github.com/XiHanFun/framework-spec) 的 Python 实现：原语层、清单、调用上下文、管道、操作契约与进程外插件运行时。语义与线上编码以规范为准，行为与 .NET 参考实现（[XiHan.Framework](https://github.com/XiHanFun/XiHan.Framework)）一致（结果取决于平台内部的地方由 ADR-0236 写死在规范里）；规范以 submodule 放在 `spec/`，一致性由规范仓库的向量验证。
+[XiHan Spec](https://github.com/XiHanFun/framework-spec) 的 Python 实现：原语层、清单、调用上下文、管道、操作契约与进程外插件运行时。语义与线上编码以规范为准，行为与 .NET 参考实现（[XiHan.Framework](https://github.com/XiHanFun/XiHan.Framework)）一致（结果取决于平台内部的地方由 ADR-0236 写死在规范里）；规范以 submodule 放在 `spec/`，一致性由规范仓库的向量与黑盒运行器验证：向量在测试里回放，插件运行时由黑盒运行器当作宿主跑示例插件。
 
 ## 模块
 
@@ -30,7 +30,7 @@
 | --- | --- | --- |
 | `primitives` | `Error` 与错误码、`Result[T]`、`Maybe[T]`、`TypedId[V]`、生命周期状态、管道阶段、Baggage 键、消息键与模板、`Catalog`、`FrameworkError` | RFC-0001、RFC-0010 |
 | `manifest` | `xihan.manifest.json` 的模型、按规范顺序的读取与逐字相同的写出 | RFC-0002 |
-| `invocation` | 不可变的 `Context`：截止时间、取消、W3C 追踪、已登记的 Baggage 与类型化键的对象袋 | RFC-0003 |
+| `invocation` | 不可变的 `Context`：截止时间、取消、W3C 追踪、已登记的 Baggage、类型化键的对象袋与随派生携带的值 | RFC-0003 |
 | `pipeline` | 固定阶段的 `Builder`，排序确定、可打印 | RFC-0004 |
 | `operation` | `Contract`、`Registry` 与让操作经完整管道执行的 `Invoker`（XGI） | RFC-0011 |
 | `plugin` | 进程外插件运行时（`xihan.plugin.v1`，基于 `grpc.aio`）与宿主回调客户端 `Host`；需要 extra `plugin` | RFC-0017 |

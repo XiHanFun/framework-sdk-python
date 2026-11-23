@@ -36,6 +36,14 @@ def validate_error_code(code: str) -> str:
     return code
 
 
+def invalid_argument(message: str) -> FrameworkError:
+    """参数、配置或线上编码不合法的错误（``PRIMITIVES_VALIDATION_001``），``message`` 是完整的英文句子。
+
+    原语的线上解码、清单的字段校验与插件运行时的声明核对共用这一个工厂；只在本包里用，不是公开名。
+    """
+    return FrameworkError(ERROR_CODE_INVALID_ARGUMENT, message)
+
+
 def error_code_kind(code: str) -> str | None:
     """返回错误码的 KIND 段；不合法时为 ``None``。"""
     return code.split("_")[1] if is_error_code(code) else None

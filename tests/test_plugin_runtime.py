@@ -68,6 +68,7 @@ from xihan_framework.plugin import (
     SubscriptionHandler,
     SubscriptionMode,
     _runtime,
+    find_host,
     host_of,
 )
 from xihan_framework.plugin.v1 import plugin_pb2 as pb
@@ -203,6 +204,7 @@ class Probe:
 
     async def callback(self, ctx: Context, request: CallbackRequest) -> Result[CallbackResponse]:
         host = host_of(ctx)
+        assert find_host(ctx) is host
         self.saved = ctx
         scoped = ctx if request.tenant is None else ctx.with_baggage(BAGGAGE_TENANT, request.tenant)
         invoked = await host.invoke(scoped, "orders.create", b'{"n":1}') if request.invoke else None
