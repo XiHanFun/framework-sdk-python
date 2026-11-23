@@ -35,6 +35,9 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
+          # 缓存 pip 下载的包；键取 pyproject.toml 的内容：依赖、extra 与开发依赖组都在里面
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: 安装 Go（黑盒运行器）
         # 版本取规范子模块里运行器的 go.mod，与锁定的规范一致
@@ -81,6 +84,9 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.13"
+          # 缓存 pip 下载的包（build 与它在隔离环境里装的构建后端）；键取 pyproject.toml 的内容
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: 构建 sdist 与 wheel
         run: |

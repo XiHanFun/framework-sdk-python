@@ -82,6 +82,7 @@ files = ["src", "tests", "examples", "scripts"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["-ra", "--strict-markers", "--strict-config"]
+# --durations=10：每次运行都列出最慢的 10 项，CI 的日志里看得到哪些用例在变慢
+addopts = ["-ra", "--strict-markers", "--strict-config", "--durations=10"]
 xfail_strict = true
 filterwarnings = ["error"]
