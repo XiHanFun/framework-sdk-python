@@ -14,7 +14,7 @@ description: 实现、修复或对齐 Python SDK 的进程外插件运行时（x
 | 协议总述、错误码 | `spec/rfcs/0017-plugin-protocol.md` | `_messages.py` |
 | 环境变量、端点、握手行、回调端点列表 | `spec/plugin/handshake.md` | `_protocol.py` |
 | 生命周期、配置、健康、停止与收尾 | `spec/plugin/lifecycle.md` | `_lifecycle.py`、`_runtime.py`、`_configuration.py` |
-| 调用、投递、元数据、错误读写、回调、日志、消息键 | `spec/plugin/invocation.md` | `_runtime.py`、`_convert.py`、`_host.py`、`_log.py`、`_messages.py` |
+| 调用、投递、元数据、错误读写、回调、日志、消息键 | `spec/plugin/invocation.md`；截止时间文本的文法在 `spec/rfcs/0003-invocation-context.md` 规则 8 | `_runtime.py`、`_convert.py`、`_host.py`、`_log.py`、`_messages.py` |
 | 协议消息与服务 | `spec/plugin/plugin.proto` | `v1/`（生成，不手改） |
 | 作者面对的类型 | `spec/plugin/` | `_model.py` |
 

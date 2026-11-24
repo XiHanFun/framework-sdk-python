@@ -33,6 +33,7 @@ REPLAYED = frozenset(
         "primitives/kernel-messages.json",  # test_kernel_messages
         "primitives/lifecycle-transitions.json",  # test_primitives
         "primitives/message-templates.json",  # test_primitives
+        "primitives/operation-ids.json",  # test_operation、test_manifest
         "primitives/trace-context.json",  # test_invocation
         "primitives/wire-encoding.json",  # test_primitives
     }

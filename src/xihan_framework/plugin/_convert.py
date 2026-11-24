@@ -31,7 +31,7 @@ PHASE_INVOKE: Final = "invoke"
 #: 宿主报了失败却没有错误时的 ``reason``（invocation.md §3）。
 REASON_FAILURE_WITHOUT_ERROR: Final = "the host reported a failure without an error"
 
-# deadline 的读法（invocation.md §2）：日期与时间的各段只认 ASCII 数字，小数 1–9 位，偏移是 Z 或 ±HH:MM；
+# deadline 的读法（截止时间文本的文法，RFC-0003 规则 8）：日期与时间的各段只认 ASCII 数字，小数 1–9 位，偏移是 Z 或 ±HH:MM；
 # 各段的取值范围在匹配之后另行核对。[0-9] 是字面的码点范围，全角数字不会匹配
 _DEADLINE: Final = re.compile(
     r"([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,9}))?"
@@ -97,7 +97,7 @@ def failed(plugin_id: str, phase: str, reason: str) -> Error:
 
 
 def parse_deadline(text: str) -> datetime | None:
-    """按 invocation.md §2 的文法严格读 ``InvocationMetadata.deadline``，返回 UTC 时刻；读不出（含空串）为 ``None``。
+    """按截止时间文本的文法（RFC-0003 规则 8）严格读 ``InvocationMetadata.deadline``，返回 UTC 时刻；读不出（含空串）为 ``None``。
 
     文法 ``^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?([Zz]|[+-][0-9]{2}:[0-9]{2})\\z``，
     年 0001–9999、月日按公历（含闰年）、时 00–23、分 00–59、秒 00–59（不认闰秒）、偏移的时 00–23 与分 00–59，换算成

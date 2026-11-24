@@ -23,7 +23,7 @@ from xihan_framework.primitives import (
     fail,
     success,
 )
-from xihan_framework.primitives._operation_id import is_operation_id
+from xihan_framework.primitives._operation_id import MAX_OPERATION_ID_LENGTH, is_operation_id
 
 #: 操作未登记。
 ERROR_CODE_NOT_FOUND: Final = "KERNEL_NOTFOUND_001"
@@ -55,6 +55,8 @@ MESSAGE_REGISTRY_FULL: Final = "kernel.operation.registry_full"
 
 #: 登记表的容量。
 CAPACITY: Final = 10000
+#: 操作 ID 的最大长度（conventions/operation-ids.md、RFC-0011「操作 ID」；与 .NET 的 ``OperationId.MaxLength`` 相同）。
+MAX_ID_LENGTH: Final = MAX_OPERATION_ID_LENGTH
 
 #: 调用器内置步骤的归属：内核清单 ID（RFC-0011 规则 10）。
 KERNEL_OWNER: Final = "xihan.kernel.core"
@@ -96,7 +98,10 @@ type Handler[Req, Res] = Callable[[Context, Req], Coroutine[Any, Any, Result[Res
 
 
 def is_id(id: str) -> bool:
-    """判断操作 ID 是否符合 ``<resource>.<verb>``（conventions/operation-ids.md）；清单的 ``contributes.operations`` 用同一个文法。"""
+    """判断操作 ID 是否符合 ``<resource>.<verb>`` 且不超过 ``MAX_ID_LENGTH`` 个字符（conventions/operation-ids.md）。
+
+    清单的 ``contributes.operations`` 用同一条规则；向量 ``primitives/operation-ids.json``。
+    """
     return is_operation_id(id)
 
 
@@ -120,7 +125,9 @@ class Contract:
         """校验并把 ``expose`` 固定成 ``Expose`` 成员的元组。"""
         if not is_id(self.id):
             raise FrameworkError(
-                ERROR_CODE_INVALID_ARGUMENT, f"The operation ID '{self.id}' must match <resource>.<verb>."
+                ERROR_CODE_INVALID_ARGUMENT,
+                f"The operation ID '{self.id}' must match <resource>.<verb> and be at most {MAX_ID_LENGTH} "
+                "characters long.",
             )
         if self.permission is not None and self.policy is not None:
             raise FrameworkError(

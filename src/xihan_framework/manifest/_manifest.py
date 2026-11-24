@@ -22,7 +22,7 @@ from xihan_framework.primitives import (
     success,
 )
 from xihan_framework.primitives._error_code import invalid_argument
-from xihan_framework.primitives._operation_id import is_operation_id
+from xihan_framework.primitives._operation_id import MAX_OPERATION_ID_LENGTH, is_operation_id
 
 #: 清单文件名。
 FILE_NAME: Final = "xihan.manifest.json"
@@ -64,7 +64,9 @@ _SEMVER = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z
 _VERSION = re.compile(_VERSION_TEXT)
 _REQUIREMENT = re.compile(rf"({_CAPABILITY_ID_TEXT})@\^?({_VERSION_TEXT})(\??)")
 _DECLARATION = re.compile(rf"({_CAPABILITY_ID_TEXT})@({_VERSION_TEXT})")
-_ACTIVATION = re.compile(r"onStartup|onOperation:[a-z0-9.*-]+|onEvent:[a-z0-9.*-]+")
+# 激活事件（RFC-0002 解析规则 2 第 3 步，lifecycle.md §3）：onOperation: 的模式是操作 ID 的字符加 *，onEvent: 的模式是主题的
+# 字符加 *；主题可以带下划线（RFC-0009），所以只有 onEvent: 的模式收下划线（ADR-0276）
+_ACTIVATION = re.compile(r"onStartup|onOperation:[a-z0-9.*-]+|onEvent:[a-z0-9._*-]+")
 # .+ 不跨换行：Python 的 . 与 .NET 一样不匹配 \n
 _PERMISSION = re.compile(r"(?:net\.outbound|fs\.read|fs\.write|capability):.+")
 _BINDING_NAME = re.compile(r"[a-z][a-z0-9-]*")
@@ -401,9 +403,12 @@ def _check_contributions(contributions: Contributions, id: str) -> None:
         if not isinstance(contribution.stage, PipelineStage):
             raise _invalid(f"the pipeline contribution '{contribution.middleware}' of '{id}' has an unknown stage")
     for operation in contributions.operations:
-        # 与操作契约同一个文法（RFC-0011、conventions/operation-ids.md）
+        # 与操作契约同一条规则：文法加 128 个字符的上限（RFC-0011、conventions/operation-ids.md）
         if not is_operation_id(operation):
-            raise _invalid(f"the operation '{operation}' of '{id}' must match <resource>.<verb>")
+            raise _invalid(
+                f"the operation '{operation}' of '{id}' must match <resource>.<verb> and be at most "
+                f"{MAX_OPERATION_ID_LENGTH} characters long"
+            )
     config = contributions.config
     if config is not None and _SECTION.fullmatch(config.section) is None:
         raise _invalid(

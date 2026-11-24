@@ -186,6 +186,35 @@ def test_registry_rejects_duplicates_and_bad_ids() -> None:
         registry.add(Contract("orders.update"), handle, request_type=Empty, response_type=Empty, owner="")
 
 
+def test_operation_ids_follow_the_vectors(vector: Callable[[str, str], Any]) -> None:
+    # conventions/operation-ids.md、RFC-0011「操作 ID」（ADR-0276）：文法加 128 个字符的上限，判定与契约用同一条规则
+    vectors = vector("primitives", "operation-ids")
+    limit = vectors["maxLength"]
+    assert vectors["valid"]
+    assert vectors["invalid"]
+    assert limit == operation.MAX_ID_LENGTH
+    for id in vectors["valid"]:
+        assert operation.is_id(id), id
+        assert Contract(id).id == id
+    for id in vectors["invalid"]:
+        assert not operation.is_id(id), repr(id)
+        with pytest.raises(FrameworkError) as raised:
+            Contract(id)
+        assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT, repr(id)
+        assert raised.value.message == (
+            f"The operation ID '{id}' must match <resource>.<verb> and be at most {limit} characters long."
+        )
+    # 向量把上限的两侧都带上：正好在上限上的合法，别处都合文法、只多一个字符的不合法
+    assert any(len(id) == limit for id in vectors["valid"])
+    assert any(len(id) == limit + 1 for id in vectors["invalid"])
+    # 上限按整个 ID 计，与哪一段长无关
+    long = "a" * (limit - 2)
+    assert operation.is_id(f"{long}.b")
+    assert not operation.is_id(f"{long}a.b")
+    assert operation.is_id(f"a.{long}")
+    assert not operation.is_id(f"a.{long}b")
+
+
 def test_registry_capacity_is_ten_thousand() -> None:
     registry = Registry()
 

@@ -23,7 +23,7 @@ git submodule status
 | `manifest` | RFC-0002、`manifest/manifest.schema.json` | `test_manifest.py` |
 | `invocation` | RFC-0003 | `test_invocation.py` |
 | `pipeline` | RFC-0004 | `test_pipeline.py` |
-| `operation` | RFC-0011 | `test_operation.py`、`test_codec.py` |
+| `operation` | RFC-0011、`conventions/operation-ids.md` | `test_operation.py`、`test_codec.py` |
 
 ## 与 .NET 一致
 

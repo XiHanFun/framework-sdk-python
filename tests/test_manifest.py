@@ -303,6 +303,78 @@ def test_contributed_operations_follow_the_operation_id_grammar() -> None:
             )
 
 
+def test_contributed_operations_follow_the_operation_id_vectors(vector: VectorLoader) -> None:
+    # conventions/operation-ids.md（ADR-0276）：清单的 contributes.operations 与操作契约用同一条规则，含 128 个字符的上限；
+    # 读取与模型两处都照 operation-ids.json 判
+    vectors = vector("primitives", "operation-ids")
+    limit = vectors["maxLength"]
+
+    def build(operation_id: str) -> Manifest:
+        return Manifest(
+            id="xihan.samples.echo",
+            version="1.0.0",
+            primitives=1,
+            stability=Stability.STABLE,
+            kind=Kind.CAPABILITY,
+            contributes=Contributions(operations=(operation_id,)),
+        )
+
+    for operation_id in vectors["valid"]:
+        assert read_ok(manifest_json(contributes={"operations": [operation_id]})).operations == (operation_id,)
+        assert build(operation_id).operations == (operation_id,)
+    for operation_id in vectors["invalid"]:
+        assert read_error(manifest_json(contributes={"operations": [operation_id]})) == invalid(
+            "$.contributes.operations[0]"
+        ), repr(operation_id)
+        with pytest.raises(FrameworkError) as raised:
+            build(operation_id)
+        assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT, repr(operation_id)
+        assert raised.value.message == (
+            f"the operation '{operation_id}' of 'xihan.samples.echo' must match <resource>.<verb> and be at most "
+            f"{limit} characters long."
+        )
+    assert any(len(operation_id) == limit for operation_id in vectors["valid"])
+    assert any(len(operation_id) == limit + 1 for operation_id in vectors["invalid"])
+
+
+def test_only_event_activation_patterns_take_underscores() -> None:
+    # RFC-0002 解析规则 2 第 3 步、lifecycle.md §3（ADR-0276）：onEvent: 的模式是主题的字符加 *，可以带下划线；
+    # onOperation: 的模式是操作 ID 的字符加 *，没有下划线。读取与模型两处判定一致
+    def build(event: str) -> Manifest:
+        return Manifest(
+            id="xihan.a.b",
+            version="1.0.0",
+            primitives=1,
+            stability=Stability.STABLE,
+            kind=Kind.CAPABILITY,
+            activation=(event,),
+        )
+
+    for event in [
+        "onStartup",
+        "onOperation:orders.*",
+        "onEvent:orders.*",
+        "onEvent:order_events.*",
+        "onEvent:_",
+        "onEvent:*",
+    ]:
+        assert read_ok(manifest_json(activation=[event])).activation == (event,)
+        assert build(event).activation == (event,)
+    for event in [
+        "onOperation:order_lines.*",
+        "onEvent:Order_Placed",
+        "onEvent:",
+        "onOperation:",
+        "onEvent:order events",
+        "onEvent:order_events\n",
+        "onBoot",
+    ]:
+        assert read_error(manifest_json(activation=[event])) == invalid("$.activation[0]"), repr(event)
+        with pytest.raises(FrameworkError) as raised:
+            build(event)
+        assert raised.value.code == ERROR_CODE_INVALID_ARGUMENT, repr(event)
+
+
 def test_requirements_follow_the_vectors(vector: VectorLoader) -> None:
     vectors = vector("primitives", "capability-requirements")
     for case in vectors["valid"]:
