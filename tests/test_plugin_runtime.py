@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import pprint
 import re
 import tempfile
 import time
@@ -15,6 +16,7 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import grpc
@@ -55,6 +57,7 @@ from xihan_framework.plugin import (
     MESSAGE_SESSION_INVALID,
     MESSAGE_UNAVAILABLE,
     SESSION_METADATA_KEY,
+    Binding,
     Configuration,
     Envelope,
     EventHandler,
@@ -536,7 +539,8 @@ def test_configurations_are_handed_over_and_read_with_types() -> None:
             assert configuration.section == {"Greeting": "hi", "RETRIES": "3", "Enabled": "True"}
             assert configuration.decode(Settings) == Settings("hi", 3, True)
             assert configuration.granted_permissions == ("capability:kernel.pipeline",)
-            assert configuration.bindings[0].name == "db"
+            # 请求里没有 properties（按较早的规范实现的宿主不发）：属性是空映射，不是没有
+            assert configuration.bindings == (Binding("db", "connection:relational", "Host=x", {}),)
             assert configuration.work_directory == "."
 
         async with running(build(probe)) as plugin:
@@ -547,6 +551,147 @@ def test_configurations_are_handed_over_and_read_with_types() -> None:
             assert probe.configuration.section == {}
 
     run(scenario)
+
+
+def test_bindings_follow_the_reading_vectors(vector: Callable[[str, str], Any]) -> None:
+    # binding-properties.json 的 reading：宿主写出的 ConfigureRequest 字节原样发给插件（不经本 SDK 的编码），插件一侧由生成的
+    # 消息类型解码、走配置这条路；绑定按先后逐项比较，属性按属性名比较。names、limits、delivery 与 json 是宿主一侧的
+    cases = vector("plugin", "binding-properties")["reading"]
+    assert cases
+
+    async def scenario() -> None:
+        for case in cases:
+            data = bytes.fromhex(case["hex"])
+            decoded = pb.ConfigureRequest.FromString(data)
+            assert [binding.name for binding in decoded.bindings] == [binding["name"] for binding in case["bindings"]]
+            probe = Probe()
+            async with running(build(probe)) as plugin:
+                await plugin.handshake()
+                configure: grpc.aio.UnaryUnaryMultiCallable[bytes, pb.ConfigureResponse] = plugin.channel.unary_unary(
+                    "/xihan.plugin.v1.Plugin/Configure",
+                    request_serializer=None,
+                    response_deserializer=pb.ConfigureResponse.FromString,
+                )
+                response = await configure(data, metadata=session())
+                assert response.status.ok, case["name"]
+                assert probe.configuration is not None, case["name"]
+                delivered = [
+                    {
+                        "name": binding.name,
+                        "type": binding.type,
+                        "value": binding.value,
+                        "properties": dict(binding.properties),
+                    }
+                    for binding in probe.configuration.bindings
+                ]
+                assert delivered == case["bindings"], case["name"]
+
+    run(scenario)
+
+
+def test_binding_properties_are_handed_over_as_sent() -> None:
+    probe = Probe()
+    # 只差大小写的两项、空值、纯数字与对象协议里的名字，以及不合下发文法的名字：SDK 不折叠、不改写、不核对
+    odd = {
+        "accessKey": "lower",
+        "AccessKey": "upper",
+        "empty": "",
+        "8080": "digits",
+        "__class__": "dunder",
+        ".hidden": "dot",
+        "user name": "space",
+    }
+    # 属性多过宿主一侧的上限（64 个）、名字长过 253 个字符：那是宿主的事
+    many = {f"p{index}": str(index) for index in range(100)} | {"n" * 300: "long"}
+
+    async def scenario() -> None:
+        async with running(build(probe)) as plugin:
+            await plugin.handshake()
+            response = await plugin.configure(
+                bindings=[
+                    # 主值为空不是错误
+                    pb.Binding(name="db", type="connection:relational", properties=odd),
+                    pb.Binding(name="many", type="queue", value="amqp://mq.internal", properties=many),
+                    # 较早的宿主不发 properties：读到的是空映射
+                    pb.Binding(name="cache", type="cache:distributed", value="redis.internal:6379"),
+                ],
+            )
+            assert response.status.ok
+
+    run(scenario)
+    assert probe.configuration is not None
+    db, queue, cache = probe.configuration.bindings
+    assert (db.name, db.type, db.value, db.properties) == ("db", "connection:relational", "", odd)
+    assert (db.properties["accessKey"], db.properties["AccessKey"]) == ("lower", "upper")
+    assert "accesskey" not in db.properties
+    assert db.properties["empty"] == ""
+    assert (queue.value, queue.properties) == ("amqp://mq.internal", many)
+    assert (cache.value, cache.properties, len(cache.properties)) == ("redis.internal:6379", {}, 0)
+    # 交出的是只读映射，也是一份拷贝：作者改不动绑定，之后改动来源也不影响它
+    assert isinstance(db.properties, MappingProxyType)
+    source = {"username": "app"}
+    copied = Binding("db", "connection:relational", "", source)
+    source["username"] = "changed"
+    assert copied.properties == {"username": "app"}
+    # 原有的三个位置参数照常可用，没有属性时是空映射；绑定照旧可哈希，属性参与相等比较
+    plain = Binding("cache", "cache:distributed", "redis.internal:6379")
+    assert plain == cache
+    assert hash(plain) == hash(cache)
+    assert plain.properties == {}
+    assert plain != Binding("cache", "cache:distributed", "redis.internal:6379", {"password": "c"})
+
+
+def test_bindings_never_print_their_values(caplog: pytest.LogCaptureFixture) -> None:
+    # 主值与属性值可能是凭据：绑定的调试输出只带绑定名、类型与属性名，运行时的日志也不带（lifecycle.md §7.2）
+    probe = Probe()
+    secrets = ("postgres://app:hunter2@db.internal/app", "app-user-7f3a", "s3cret-9d1c")
+    value, username, password = secrets
+
+    async def scenario() -> None:
+        async with running(build(probe)) as plugin:
+            await plugin.handshake()
+            response = await plugin.configure(
+                bindings=[
+                    pb.Binding(
+                        name="db",
+                        type="connection:relational",
+                        value=value,
+                        properties={"username": username, "password": password},
+                    )
+                ],
+            )
+            assert response.status.ok
+            started = await plugin.stub.Start(pb.StartRequest(), metadata=session())
+            assert started.status.ok
+            assert (await plugin.stop()).status.ok
+            await plugin.exited()
+
+    with caplog.at_level(logging.DEBUG):
+        run(scenario)
+        assert probe.configuration is not None
+        (binding,) = probe.configuration.bindings
+        # 作者照常读得到值
+        assert (binding.value, binding.properties["password"]) == (value, password)
+        logging.getLogger("xihan.tests.probe").info("Configured %s with %r.", binding, probe.configuration)
+    assert repr(binding) == "Binding(name='db', type='connection:relational', property_names=['password', 'username'])"
+    outputs = {
+        "repr(binding)": repr(binding),
+        "str(binding)": str(binding),
+        "f-string": f"{binding} {binding!r}",
+        "repr(bindings)": repr(probe.configuration.bindings),
+        "repr(configuration)": repr(probe.configuration),
+        "pprint(binding)": pprint.pformat(binding, width=20),
+        "pprint(configuration)": pprint.pformat(probe.configuration, width=20),
+        "log messages": "\n".join(record.getMessage() for record in caplog.records),
+        "log records": "\n".join(repr(record.__dict__) for record in caplog.records),
+    }
+    assert "Stopped." in outputs["log messages"]
+    for name, text in outputs.items():
+        for secret in secrets:
+            assert secret not in text, f"{name} must not carry '{secret}': {text}"
+    for name in ("repr(configuration)", "pprint(configuration)", "log messages"):
+        for expected in ("db", "connection:relational", "password", "username"):
+            assert expected in outputs[name], f"{name} must carry '{expected}': {outputs[name]}"
 
 
 def test_configure_failures_and_exceptions_leave_the_plugin_failed() -> None:

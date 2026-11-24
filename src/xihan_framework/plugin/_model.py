@@ -124,11 +124,31 @@ class Health:
 
 @dataclass(frozen=True, slots=True)
 class Binding:
-    """宿主解析好的资源绑定（清单 ``bindings``）。"""
+    """宿主解析好的资源绑定连同属性（清单 ``bindings``，lifecycle.md §2、§7.2）。
+
+    ``name`` 是清单里的绑定名，``type`` 是资源类型，``value`` 是主值（连接串或地址）：来源只给了属性、没有给主值时为空串，
+    不是错误。``properties`` 是其余属性（属性名到属性值）的只读映射：属性名区分大小写、原样交出（``accessKey`` 与
+    ``AccessKey`` 是两项）；没有属性时是空映射（按较早的规范实现的宿主不发这个字段，读到的也是空映射），值为空的属性照样在
+    里面，各项的先后没有含义。运行时不核对属性名的文法与上限，那是宿主的事。
+
+    主值与属性值可能是凭据，不要写进日志、错误与其他诊断输出：``repr``（``str``、``print`` 与日志的 ``%s`` / ``%r`` 也是它）
+    只带绑定名、类型与排好序的属性名，不带主值与属性值。
+    """
 
     name: str
     type: str
-    value: str
+    # repr=False：按字段的 repr 标记打印的工具（pprint 之类）同样不带主值与属性值
+    value: str = field(repr=False)
+    # hash=False：只读映射不可哈希，绑定照旧可哈希（相等的绑定哈希相同，属性不同的绑定不相等）
+    properties: Mapping[str, str] = field(default_factory=dict, repr=False, hash=False)
+
+    def __post_init__(self) -> None:
+        """把属性复制成只读映射：之后改动传入的映射不影响这个绑定，作者也改不动它。"""
+        object.__setattr__(self, "properties", MappingProxyType(dict(self.properties)))
+
+    def __repr__(self) -> str:
+        """调试输出：只带绑定名、类型与属性名，不带主值与属性值（lifecycle.md §7.2）。"""
+        return f"Binding(name={self.name!r}, type={self.type!r}, property_names={sorted(self.properties)!r})"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -137,7 +157,8 @@ class Configuration:
 
     ``section`` 是清单 ``contributes.config.section`` 节的 JSON 对象（没有声明配置节、或宿主下发的为空时是空对象）；
     宿主写出的叶子一律是 JSON 字符串，类型化读取用 ``decode``。``granted_permissions`` 是宿主授予的权限，回调前的权限
-    核对以它为准（invocation.md §5）；``bindings`` 只含清单声明的绑定；``work_directory`` 是宿主分配的可写目录。
+    核对以它为准（invocation.md §5）；``bindings`` 只含清单声明的绑定，按宿主下发的先后，每个连同它的属性
+    （``Binding.properties``）；``work_directory`` 是宿主分配的可写目录。
     """
 
     section: Mapping[str, JsonValue]

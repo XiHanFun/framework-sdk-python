@@ -604,7 +604,11 @@ class _Runtime:
                 configuration = Configuration(
                     section=section,
                     granted_permissions=tuple(request.granted_permissions),
-                    bindings=tuple(Binding(binding.name, binding.type, binding.value) for binding in request.bindings),
+                    # 绑定连同属性原样交出：不折叠属性名的大小写、不核对文法与上限，主值为空也不是错误（lifecycle.md §7.2）
+                    bindings=tuple(
+                        Binding(binding.name, binding.type, binding.value, binding.properties)
+                        for binding in request.bindings
+                    ),
                     work_directory=request.work_directory,
                 )
                 hook = self.plugin.hooks.configure

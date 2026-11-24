@@ -19,6 +19,7 @@ REPLAYED = frozenset(
         "manifest/manifests.json",  # test_manifest
         "operations/payload-reasons.json",  # test_operation
         "pipeline/ordering.json",  # test_pipeline
+        "plugin/binding-properties.json",  # test_plugin_runtime（reading；names、limits、delivery 与 json 是宿主一侧的）
         "plugin/callback-status.json",  # test_plugin_protocol
         "plugin/deadlines.json",  # test_plugin_protocol
         "plugin/error-reading.json",  # test_plugin_protocol

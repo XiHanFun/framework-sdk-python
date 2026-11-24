@@ -502,25 +502,54 @@ class Binding(_message.Message):
 
     DESCRIPTOR: _descriptor.Descriptor
 
+    @_typing.final
+    class PropertiesEntry(_message.Message):
+        DESCRIPTOR: _descriptor.Descriptor
+
+        KEY_FIELD_NUMBER: _builtins.int
+        VALUE_FIELD_NUMBER: _builtins.int
+        key: _builtins.str
+        value: _builtins.str
+        def __init__(
+            self,
+            *,
+            key: _builtins.str = ...,
+            value: _builtins.str = ...,
+        ) -> None: ...
+        _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
+        def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+        _ClearFieldArgType: _TypeAlias = _typing.Literal["key", b"key", "value", b"value"]  # noqa: Y015
+        def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+        def WhichOneof(self, oneof_group: _Never) -> None: ...
+
     NAME_FIELD_NUMBER: _builtins.int
     TYPE_FIELD_NUMBER: _builtins.int
     VALUE_FIELD_NUMBER: _builtins.int
+    PROPERTIES_FIELD_NUMBER: _builtins.int
     name: _builtins.str
     """绑定名。"""
     type: _builtins.str
     """资源类型（`connection:relational`、`cache:distributed`、`queue`、`blob`）。"""
     value: _builtins.str
     """连接串或地址。"""
+    @_builtins.property
+    def properties(self) -> _containers.ScalarMap[_builtins.str, _builtins.str]:
+        """绑定的其余属性，键是属性名（区分大小写）、值是属性值；没有其余属性时为空。来源只给了属性、没有主值的绑定照常下发，
+        `value` 为空。属性名的文法、数量与大小的上限见 lifecycle.md §2；属性值可能是凭据，宿主与插件都不得写进日志。
+        较早的宿主不发这个字段，较早的插件忽略它。
+        """
+
     def __init__(
         self,
         *,
         name: _builtins.str = ...,
         type: _builtins.str = ...,
         value: _builtins.str = ...,
+        properties: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["name", b"name", "type", b"type", "value", b"value"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["name", b"name", "properties", b"properties", "type", b"type", "value", b"value"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 
