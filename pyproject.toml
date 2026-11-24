@@ -31,7 +31,7 @@ dependencies = []
 plugin = ["grpcio>=1.85.1", "protobuf>=7.36.2,<8"]
 
 [project.urls]
-Homepage = "https://framework.xihanfun.com"
+Homepage = "https://framework.docs.xihanfun.com"
 Documentation = "https://framework.docs.xihanfun.com"
 Repository = "https://github.com/XiHanFun/framework-sdk-python"
 Specification = "https://github.com/XiHanFun/framework-spec"
