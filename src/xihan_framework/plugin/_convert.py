@@ -139,11 +139,24 @@ def format_time(time: datetime) -> str:
 
     秒的小数去掉末尾的 0，全为 0 时不写小数点，最多六位（``datetime`` 只到微秒），六个 SDK 对同一时刻写出同一份文本
     （精度以内）。年份按四位补零，不经 ``strftime``（各平台的 ``%Y`` 对 1000 年之前不一致）。``time`` 必须带时区，
-    ``Envelope`` 构造时已经核对过。
+    ``Envelope`` 构造时已经核对过。不在本地核对年份范围（ADR-0306）：换算成 UTC 之后落到 0001 年之前或 9999 年之后的
+    照写成 ``0000-12-31T…Z`` 与 ``10000-01-01T…Z``，由宿主拒绝那一项。
     """
-    utc = time.astimezone(UTC)
+    try:
+        utc = time.astimezone(UTC)
+        date = f"{utc.year:04d}-{utc.month:02d}-{utc.day:02d}"
+    except OverflowError:
+        # datetime 只有 0001–9999 年，偏移又不到一天：越界的时刻只能落在 0000-12-31 或 10000-01-01。挪一天算出一天里的
+        # 时刻，日期照写
+        offset = time.utcoffset()
+        assert offset is not None
+        naive = time.replace(tzinfo=None)
+        if offset > timedelta(0):
+            utc, date = naive + (timedelta(days=1) - offset), "0000-12-31"
+        else:
+            utc, date = naive - (timedelta(days=1) + offset), "10000-01-01"
     fraction = f".{utc.microsecond:06d}".rstrip("0") if utc.microsecond else ""
-    return f"{utc.year:04d}-{utc.month:02d}-{utc.day:02d}T{utc.hour:02d}:{utc.minute:02d}:{utc.second:02d}{fraction}Z"
+    return f"{date}T{utc.hour:02d}:{utc.minute:02d}:{utc.second:02d}{fraction}Z"
 
 
 def format_deadline(deadline: datetime) -> str:

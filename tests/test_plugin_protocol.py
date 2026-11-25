@@ -294,20 +294,36 @@ def test_envelope_times_from_the_host_outside_the_grammar_are_not_read(text: str
     assert _delivered(time=text) is None
 
 
-def test_envelope_times_must_be_timezone_aware_datetimes_that_fit_utc() -> None:
+def test_envelope_times_must_be_timezone_aware_datetimes() -> None:
     with pytest.raises(FrameworkError) as naive:
         _envelope(time=datetime(2026, 11, 25, 3, 25))
     assert naive.value.code == ERROR_CODE_INVALID_ARGUMENT
     assert isinstance(naive.value, ValueError)
     with pytest.raises(TypeError):
         _envelope(time="2026-11-25T03:25:00Z")
-    for outside in (
-        datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=1))),
-        datetime(9999, 12, 31, 23, 30, tzinfo=timezone(timedelta(hours=-1))),
-    ):
-        with pytest.raises(FrameworkError) as overflow:
-            _envelope(time=outside)
-        assert overflow.value.code == ERROR_CODE_INVALID_ARGUMENT
+
+
+@pytest.mark.parametrize(
+    ("time", "text"),
+    [
+        (datetime(1, 1, 1, 0, 30, tzinfo=timezone(timedelta(hours=1))), "0000-12-31T23:30:00Z"),
+        (
+            datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=23, minutes=59, microseconds=500))),
+            "0000-12-31T00:00:59.9995Z",
+        ),
+        (datetime(9999, 12, 31, 23, 30, tzinfo=timezone(timedelta(hours=-1))), "10000-01-01T00:30:00Z"),
+        (
+            datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=timezone(-timedelta(hours=23, minutes=59))),
+            "10000-01-01T23:58:59.999999Z",
+        ),
+    ],
+)
+def test_envelope_times_outside_the_four_digit_years_in_utc_are_written_for_the_host_to_reject(
+    time: datetime, text: str
+) -> None:
+    # 不在本地核对年份范围（ADR-0306）：照写，宿主以 messaging.envelope.invalid_time 拒绝那一项
+    assert to_proto_envelope(_envelope(time=time)).time == text
+    assert parse_timestamp(text) is None
 
 
 def test_envelopes_carry_the_data_schema_as_is() -> None:
