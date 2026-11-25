@@ -59,6 +59,7 @@ from xihan_framework.plugin import (
 )
 from xihan_framework.plugin._convert import (
     REASON_FAILURE_WITHOUT_ERROR,
+    _details,
     effective_deadline,
     format_deadline,
     format_time,
@@ -462,6 +463,20 @@ def test_errors_written_by_the_host_follow_the_vector(vector: VectorLoader) -> N
         for absent in missing:
             result = from_status(absent, plugin_id=plugin_id, phase=phase)
             assert _decoded(result.error) == _expected(case["expected"]), case
+
+
+def test_error_details_with_lone_surrogates_are_no_details() -> None:
+    # 以字符串交来的 JSON 文本严格编码成 UTF-8，代理项码点编码不成 UTF-8，与非法字节一样不合法（RFC-0001「JSON 文本」，
+    # ADR-0301）；Python 的 str 里两个代理项码点也不是一个字符。protobuf 的字符串字段本来就收不下它们，线上触发不到
+    for text in (
+        '{"a":"' + chr(0xD800) + '"}',
+        '{"a":"' + chr(0xDC00) + '"}',
+        '{"a":"' + chr(0xD83D) + chr(0xDE00) + '"}',
+    ):
+        assert _details(text) is None, ascii(text)
+        with pytest.raises(UnicodeEncodeError):
+            pb.Error(code="ORDERS_VALIDATION_001", details=text)
+    assert _details('{"a":"' + chr(0x1F600) + '"}') == {"a": chr(0x1F600)}
 
 
 def test_errors_written_by_the_host_are_read_by_the_same_rules() -> None:
