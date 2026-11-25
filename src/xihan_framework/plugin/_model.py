@@ -3,7 +3,7 @@
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from enum import Enum, StrEnum
 
 from xihan_framework._json import JsonValue
@@ -62,6 +62,12 @@ class Subscription:
 class Envelope:
     """CloudEvents 1.0 信封的平铺（RFC-0009）；``extensions`` 是扩展属性（如 ``xihantenant``）的只读映射。
 
+    ``time`` 是带时区的 ``datetime``，``None`` 为没有时间；不带时区的 ``datetime`` 不知道是哪个时刻，构造时抛出
+    ``FrameworkError``（``ValueError`` 的子类），不猜时区；换算成 UTC 之后落到 0001 年之前或 9999 年之后的同样抛出。
+    发布时换算成 UTC 写成 RFC 3339：以 ``Z`` 结尾，秒的小数去掉末尾的 0，全为 0 时不写小数点，最多六位（``datetime``
+    只到微秒），如 ``2026-11-25T03:25:00.5Z``。收到的信封里是 UTC 的 ``datetime``：宿主写来的文本按 RFC-0003 规则 8
+    读（invocation.md §4），比微秒更细的小数截断、不进位。
+
     ``data_schema`` 是 CloudEvents 的 ``dataschema``（ADR-0305），``None`` 为没有；收到与发布都原样，SDK 不核对、
     不改写（invocation.md §4），写成空串与 ``None`` 一样是没有。
 
@@ -75,15 +81,36 @@ class Envelope:
     type: str
     spec_version: str = "1.0"
     subject: str | None = None
-    time: str | None = None
+    time: datetime | None = None
     data_content_type: str = "application/json"
     data_schema: str | None = None
     data: bytes = b""
     extensions: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """把扩展属性复制成只读映射：之后改动传入的映射不影响这个信封。"""
+        """核对时间带时区且换算得成 UTC，再把扩展属性复制成只读映射：之后改动传入的映射不影响这个信封。"""
+        if self.time is not None:
+            _check_time(self.id, self.time)
         object.__setattr__(self, "extensions", freeze(self.extensions))
+
+
+def _check_time(envelope_id: str, time: object) -> None:
+    """信封的时间必须是带时区、换算得成 UTC 的 ``datetime``：写出时要换算成 UTC（RFC-0009「信封」第 3 条）。"""
+    # 以前的 time 是文本：给了字符串的调用方得到指明类型的 TypeError，而不是写出时才失败
+    if not isinstance(time, datetime):
+        raise TypeError(f"The time of the envelope '{envelope_id}' must be a datetime, not '{type(time).__name__}'.")
+    # utcoffset 为 None 即不带时区（含 tzinfo 不给偏移的情形），不按本机时区或 UTC 去猜
+    if time.utcoffset() is None:
+        raise FrameworkError(
+            ERROR_CODE_INVALID_ARGUMENT, f"The time of the envelope '{envelope_id}' must be a timezone-aware datetime."
+        )
+    try:
+        time.astimezone(UTC)
+    except OverflowError:
+        raise FrameworkError(
+            ERROR_CODE_INVALID_ARGUMENT,
+            f"The time of the envelope '{envelope_id}' falls outside the years 0001 to 9999 once converted to UTC.",
+        ) from None
 
 
 type EventHandler = Callable[[Context, Envelope, int], Awaitable[Result[Unit]]]

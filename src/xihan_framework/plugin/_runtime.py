@@ -1034,7 +1034,11 @@ class _Service(pb_grpc.PluginServicer):
     async def HandleEvent(  # noqa: N802
         self, request: pb.HandleEventRequest, context: grpc.aio.ServicerContext[Any, Any]
     ) -> pb.HandleEventResponse:
-        """投递一条消息（invocation.md §4），依次核对：信封与投递方式、订阅、可服务状态，再按声明顺序交给匹配的处理器。"""
+        """投递一条消息（invocation.md §4），依次核对：信封与投递方式、订阅、可服务状态，再按声明顺序交给匹配的处理器。
+
+        信封的 ``time`` 不合 RFC-0003 规则 8 的读法与缺信封一样以 ``InvalidArgument`` 拒绝：宿主写来的一律合文法，读不出
+        是宿主的问题，不交给作者、也不当作没有时间。
+        """
         runtime = self._runtime
         if not request.HasField("envelope") or request.mode not in _SUBSCRIPTION_MODES:
             await context.abort(
@@ -1042,6 +1046,11 @@ class _Service(pb_grpc.PluginServicer):
                 "A delivery needs an envelope and a mode of '', 'competing' or 'broadcast'.",
             )
         envelope = from_proto_envelope(request.envelope)
+        if envelope is None:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                f"The envelope time '{request.envelope.time}' is not an RFC 3339 date-time as RFC-0003 rule 8 reads it.",
+            )
         # 投递时宿主总是填写方式，空同竞争消费
         mode = request.mode or SubscriptionMode.COMPETING.value
         handlers = runtime.handlers_for(envelope, mode)

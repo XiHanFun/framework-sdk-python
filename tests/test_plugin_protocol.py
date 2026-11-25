@@ -1,15 +1,16 @@
-"""插件协议的数据规则：握手行、回调端点、截止时间、回调失败的映射与消息键的向量，协议消息的转换、运行时的消息目录、
-配置节的类型化读取、回调的本地核对、日志格式与插件声明的核对。"""
+"""插件协议的数据规则：握手行、回调端点、截止时间与信封的时间、回调失败的映射与消息键的向量，协议消息的转换、运行时的消息
+目录、配置节的类型化读取、回调的本地核对、日志格式与插件声明的核对。"""
 
 import io
 import json
 import logging
+import re
 import subprocess
 import sys
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from importlib.resources.abc import Traversable
 from typing import Any, cast
 
@@ -59,10 +60,11 @@ from xihan_framework.plugin._convert import (
     REASON_FAILURE_WITHOUT_ERROR,
     effective_deadline,
     format_deadline,
+    format_time,
     from_proto_envelope,
     from_proto_error,
     from_status,
-    parse_deadline,
+    parse_timestamp,
     restore_context,
     to_metadata,
     to_proto_envelope,
@@ -180,10 +182,10 @@ def test_endpoints_follow_the_handshake_grammar() -> None:
 def test_deadlines_follow_the_vector(vector: VectorLoader) -> None:
     deadlines = vector("plugin", "deadlines")
     for case in deadlines["valid"]:
-        assert parse_deadline(case["text"]) == _utc(case["utc"]), case["text"]
+        assert parse_timestamp(case["text"]) == _utc(case["utc"]), case["text"]
     for text in deadlines["invalid"]:
-        assert parse_deadline(text) is None, text
-    assert parse_deadline("") is None
+        assert parse_timestamp(text) is None, text
+    assert parse_timestamp("") is None
     for case in deadlines["effective"]:
         grpc = None if case["grpc"] is None else _utc(case["grpc"])
         expected = None if case["expected"] is None else _utc(case["expected"])
@@ -199,9 +201,111 @@ def _envelope(**fields: Any) -> Envelope:
     return Envelope(topic="orders", id="e1", source="urn:test", type="orders.created", **fields)
 
 
-def _delivered(**fields: Any) -> Envelope:
+def _delivered(**fields: Any) -> Envelope | None:
     """宿主写来的信封经 SDK 读出的样子。"""
     return from_proto_envelope(pb.Envelope(topic="orders", id="e1", source="urn:test", type="orders.created", **fields))
+
+
+def _delivered_time(text: str) -> datetime | None:
+    envelope = _delivered(time=text)
+    assert envelope is not None, text
+    assert envelope.time is None or envelope.time.tzinfo is UTC, text
+    return envelope.time
+
+
+def test_envelope_times_follow_the_vector(vector: VectorLoader) -> None:
+    # 向量在 host 档：valid 与 invalid 是宿主读插件写来的时间，SDK 读宿主写来的时间按同一条文法；written 是宿主写给插件的
+    times = vector("plugin", "envelope-times")
+    for case in times["valid"]:
+        assert _delivered_time(case["text"]) == (None if case["utc"] is None else _utc(case["utc"])), case["text"]
+    for text in times["invalid"]:
+        assert _delivered(time=text) is None, text
+    for case in times["written"]:
+        instant = case["instant"]
+        assert _delivered_time(case["text"]) == (None if instant is None else _instant(instant)), case
+
+
+def _instant(text: str) -> datetime:
+    """``written`` 的 ``instant``（带偏移、小数最多七位）截断到微秒后的 UTC 时刻。"""
+    match = re.fullmatch(r"([^.]*?)(?:\.([0-9]+))?(Z|[+-][0-9]{2}:[0-9]{2})", text)
+    assert match is not None, text
+    offset = "+00:00" if match[3] == "Z" else match[3]
+    base = datetime.fromisoformat(match[1] + offset)
+    return base.replace(microsecond=int(((match[2] or "") + "000000")[:6])).astimezone(UTC)
+
+
+#: 六个 SDK 共用的写出用例：作者给的时刻 → SDK 写出的 ``time``（UTC、``Z``、小数去掉末尾的 0）。
+WRITTEN_TIMES: list[tuple[datetime, str]] = [
+    (datetime(2026, 11, 25, 3, 25, 0, 123000, tzinfo=UTC), "2026-11-25T03:25:00.123Z"),
+    (datetime(2026, 11, 25, 3, 25, 0, 500000, tzinfo=UTC), "2026-11-25T03:25:00.5Z"),
+    (datetime(2026, 11, 25, 3, 25, 0, 120000, tzinfo=UTC), "2026-11-25T03:25:00.12Z"),
+    (datetime(2026, 11, 25, 3, 25, tzinfo=UTC), "2026-11-25T03:25:00Z"),
+    (datetime(2026, 11, 25, 11, 25, 0, 250000, tzinfo=timezone(timedelta(hours=8))), "2026-11-25T03:25:00.25Z"),
+    (datetime(2026, 11, 24, 22, 25, tzinfo=timezone(timedelta(hours=-5))), "2026-11-25T03:25:00Z"),
+    (datetime(2026, 1, 1, 0, 30, tzinfo=timezone(timedelta(hours=1))), "2025-12-31T23:30:00Z"),
+    (datetime(1, 1, 1, tzinfo=UTC), "0001-01-01T00:00:00Z"),
+    # 微秒是 datetime 的精度
+    (datetime(2026, 11, 25, 3, 25, 0, 1, tzinfo=UTC), "2026-11-25T03:25:00.000001Z"),
+    (datetime(2026, 11, 25, 3, 25, 0, 123456, tzinfo=UTC), "2026-11-25T03:25:00.123456Z"),
+    (datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=UTC), "9999-12-31T23:59:59.999999Z"),
+]
+
+#: 六个 SDK 共用的读入用例：宿主写来的 ``time`` → 作者收到的 UTC 时刻（比微秒更细的小数截断）。
+READ_TIMES: list[tuple[str, datetime | None]] = [
+    ("2026-11-25T11:25:00+08:00", datetime(2026, 11, 25, 3, 25, tzinfo=UTC)),
+    ("2026-11-24T22:25:00.25-05:00", datetime(2026, 11, 25, 3, 25, 0, 250000, tzinfo=UTC)),
+    ("2026-11-25t03:25:00z", datetime(2026, 11, 25, 3, 25, tzinfo=UTC)),
+    ("2026-11-25T03:25:00.1234567+00:00", datetime(2026, 11, 25, 3, 25, 0, 123456, tzinfo=UTC)),
+    ("2026-11-25T03:25:00.123456789Z", datetime(2026, 11, 25, 3, 25, 0, 123456, tzinfo=UTC)),
+    ("9999-12-31T23:59:59.999999999Z", datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=UTC)),
+    ("", None),
+]
+
+
+@pytest.mark.parametrize(("time", "text"), WRITTEN_TIMES)
+def test_envelope_times_are_written_in_utc_with_the_trailing_zeros_of_the_fraction_dropped(
+    time: datetime, text: str
+) -> None:
+    assert format_time(time) == text
+    assert to_proto_envelope(_envelope(time=time)).time == text
+    # 往返：写出的文本读回同一个时刻
+    assert _delivered_time(text) == time
+
+
+@pytest.mark.parametrize(("text", "time"), READ_TIMES)
+def test_envelope_times_from_the_host_are_read_in_utc_and_truncated_to_microseconds(
+    text: str, time: datetime | None
+) -> None:
+    assert _delivered_time(text) == time
+
+
+def test_envelopes_without_a_time_write_an_empty_text() -> None:
+    assert to_proto_envelope(_envelope()).time == ""
+    assert _envelope().time is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["2026-11-25T03:25:60Z", "2026-11-25T03:25:00", "2026-11-25 03:25:00Z", "2026-11-25T03:25:00.1234567890Z", " "],
+)
+def test_envelope_times_from_the_host_outside_the_grammar_are_not_read(text: str) -> None:
+    assert _delivered(time=text) is None
+
+
+def test_envelope_times_must_be_timezone_aware_datetimes_that_fit_utc() -> None:
+    with pytest.raises(FrameworkError) as naive:
+        _envelope(time=datetime(2026, 11, 25, 3, 25))
+    assert naive.value.code == ERROR_CODE_INVALID_ARGUMENT
+    assert isinstance(naive.value, ValueError)
+    with pytest.raises(TypeError):
+        _envelope(time="2026-11-25T03:25:00Z")
+    for outside in (
+        datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=1))),
+        datetime(9999, 12, 31, 23, 30, tzinfo=timezone(timedelta(hours=-1))),
+    ):
+        with pytest.raises(FrameworkError) as overflow:
+            _envelope(time=outside)
+        assert overflow.value.code == ERROR_CODE_INVALID_ARGUMENT
 
 
 def test_envelopes_carry_the_data_schema_as_is() -> None:
@@ -220,6 +324,8 @@ def test_envelopes_carry_the_data_schema_as_is() -> None:
     assert _envelope(data_schema="urn:a") != _envelope(data_schema="urn:b")
     assert _envelope(data_schema="urn:a") == _envelope(data_schema="urn:a")
     assert hash(_envelope(data_schema="urn:a")) == hash(_envelope(data_schema="urn:a"))
+    time = datetime(2026, 11, 25, 3, 25, tzinfo=UTC)
+    assert "time=datetime.datetime(2026, 11, 25, 3, 25" in repr(_envelope(time=time))
 
 
 def test_callback_failures_follow_the_vector(vector: VectorLoader) -> None:

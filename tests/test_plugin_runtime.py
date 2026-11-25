@@ -14,7 +14,7 @@ import tempfile
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -147,6 +147,10 @@ def outcome(result: Result[Any]) -> Outcome:
     return Outcome(error.code, error.message_key, None if error.details is None else dict(error.details))
 
 
+#: ``probes.callback`` 发布的第一项信封的时间：东八区的时刻，写出时换算成 UTC。
+PUBLISHED_TIME = datetime(2026, 11, 25, 11, 25, 0, 500000, tzinfo=timezone(timedelta(hours=8)))
+
+
 class Probe:
     """测试插件的状态：记录收到的配置、事件、停止与健康探测，控制等待中的调用与各个回调的结果。"""
 
@@ -216,6 +220,9 @@ class Probe:
                 id=f"e{index}",
                 source="urn:probe",
                 type="orders.created",
+                # 第一项带时间与 dataschema，其余没有
+                time=PUBLISHED_TIME if index == 0 else None,
+                data_schema="urn:schema:orders" if index == 0 else None,
                 extensions={} if tenant is None else {EXTENSION_TENANT: tenant},
             )
             for index, tenant in enumerate(request.envelope_tenants)
@@ -293,10 +300,12 @@ def invoke(operation_id: str, payload: bytes = b"{}", **baggage: str) -> pb.Invo
     )
 
 
-def deliver(topic: str, identifier: str, mode: str, message_type: str = "probe.created") -> pb.HandleEventRequest:
+def deliver(
+    topic: str, identifier: str, mode: str, message_type: str = "probe.created", **envelope: Any
+) -> pb.HandleEventRequest:
     return pb.HandleEventRequest(
         envelope=pb.Envelope(
-            topic=topic, id=identifier, source="urn:test", type=message_type, spec_version="1.0", data=b"{}"
+            topic=topic, id=identifier, source="urn:test", type=message_type, spec_version="1.0", data=b"{}", **envelope
         ),
         metadata=pb.InvocationMetadata(trace_parent=TRACE_PARENT),
         attempt=2,
@@ -1053,6 +1062,14 @@ def test_deliveries_are_checked_in_order() -> None:
                 plugin.stub.HandleEvent(deliver("probe.events", "a", "bogus"), metadata=session()),
                 grpc.StatusCode.INVALID_ARGUMENT,
             )
+            # 宿主写来的 time 读不出：不交给作者，也不当作没有时间；先于找订阅
+            for topic in ("probe.events", "nobody.listens"):
+                await expect_code(
+                    plugin.stub.HandleEvent(
+                        deliver(topic, "a", "competing", time="2026-11-25T03:25:00"), metadata=session()
+                    ),
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                )
             # 找订阅先于就绪：没人订阅的主题报 unsubscribed，订阅了的报不可用
             for mode in ("competing", ""):
                 unsubscribed = await plugin.stub.HandleEvent(deliver("nobody.listens", "a", mode), metadata=session())
@@ -1103,6 +1120,40 @@ def test_events_are_delivered_by_topic_mode_and_type() -> None:
             ]
 
     run(scenario)
+
+
+def test_delivered_envelopes_carry_the_time_in_utc_and_the_data_schema_as_is() -> None:
+    received: list[Envelope] = []
+
+    async def handle(ctx: Context, envelope: Envelope, attempt: int) -> Result[Unit]:
+        received.append(envelope)
+        return success()
+
+    subscriptions = [SubscriptionHandler(Subscription("probe.events"), handle)]
+
+    async def scenario() -> None:
+        async with running(build(Probe(), subscriptions=subscriptions)) as plugin:
+            await plugin.start()
+            for request in (
+                deliver(
+                    "probe.events",
+                    "a",
+                    "competing",
+                    time="2026-11-25T11:25:00.1234567+08:00",
+                    data_schema=" https://example.com/schemas/order.json ",
+                ),
+                deliver("probe.events", "b", "competing"),
+            ):
+                response = await plugin.stub.HandleEvent(request, metadata=session())
+                assert response.status.ok, response.status
+
+    run(scenario)
+    timed, plain = received
+    # 换算成 UTC，比微秒更细的小数截断；dataschema 原样、不裁剪
+    assert timed.time == datetime(2026, 11, 25, 3, 25, 0, 123456, tzinfo=UTC)
+    assert timed.time.tzinfo is UTC
+    assert timed.data_schema == " https://example.com/schemas/order.json "
+    assert (plain.time, plain.data_schema) == (None, None)
 
 
 def test_matching_subscriptions_run_in_declaration_order_until_the_first_failure() -> None:
@@ -1393,6 +1444,13 @@ def test_callbacks_pick_the_dialable_endpoint_and_carry_the_call_context() -> No
             [published] = host.publications
             assert [envelope.id for envelope in published.request.envelopes] == ["e0", "e1", "e2"]
             assert published.request.envelopes[2].extensions[EXTENSION_TENANT] == "t2"
+            # time 换算成 UTC、以 Z 结尾，dataschema 原样；没有的写空串
+            sent = published.request.envelopes
+            assert [(envelope.time, envelope.data_schema) for envelope in sent] == [
+                ("2026-11-25T03:25:00.5Z", "urn:schema:orders"),
+                ("", ""),
+                ("", ""),
+            ]
             assert published.request.metadata.baggage["xihan.tenant"] == "t1"
             assert published.metadata[SESSION_METADATA_KEY] == TOKEN
 

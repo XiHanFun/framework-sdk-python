@@ -22,6 +22,7 @@ REPLAYED = frozenset(
         "plugin/binding-properties.json",  # test_plugin_runtime（reading；names、limits、delivery 与 json 是宿主一侧的）
         "plugin/callback-status.json",  # test_plugin_protocol
         "plugin/deadlines.json",  # test_plugin_protocol
+        "plugin/envelope-times.json",  # test_plugin_protocol（host 档；SDK 读宿主写来的 time 是同一条文法）
         "plugin/error-reading.json",  # test_plugin_protocol
         "plugin/handshake-lines.json",  # test_plugin_protocol
         "plugin/host-addresses.json",  # test_plugin_protocol

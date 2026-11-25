@@ -31,14 +31,14 @@ PHASE_INVOKE: Final = "invoke"
 #: 宿主报了失败却没有错误时的 ``reason``（invocation.md §3）。
 REASON_FAILURE_WITHOUT_ERROR: Final = "the host reported a failure without an error"
 
-# deadline 的读法（截止时间文本的文法，RFC-0003 规则 8）：日期与时间的各段只认 ASCII 数字，小数 1–9 位，偏移是 Z 或 ±HH:MM；
-# 各段的取值范围在匹配之后另行核对。[0-9] 是字面的码点范围，全角数字不会匹配
-_DEADLINE: Final = re.compile(
+# 时间文本的读法（RFC-0003 规则 8，截止时间与信封的 time 共用）：日期与时间的各段只认 ASCII 数字，小数 1–9 位，偏移是 Z 或
+# ±HH:MM；各段的取值范围在匹配之后另行核对。[0-9] 是字面的码点范围，全角数字不会匹配
+_TIMESTAMP: Final = re.compile(
     r"([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,9}))?"
     r"(?:[Zz]|([+-])([0-9]{2}):([0-9]{2}))"
 )
-_MIN_DEADLINE: Final = datetime(1, 1, 1, tzinfo=UTC)
-_MAX_DEADLINE: Final = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
+_MIN_TIMESTAMP: Final = datetime(1, 1, 1, tzinfo=UTC)
+_MAX_TIMESTAMP: Final = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
 
 
 def to_proto_error(error: Error) -> pb.Error:
@@ -96,15 +96,16 @@ def failed(plugin_id: str, phase: str, reason: str) -> Error:
     return Error.unexpected(ERROR_CODE_UNEXPECTED, MESSAGE_FAILED, {"id": plugin_id, "phase": phase, "reason": reason})
 
 
-def parse_deadline(text: str) -> datetime | None:
-    """按截止时间文本的文法（RFC-0003 规则 8）严格读 ``InvocationMetadata.deadline``，返回 UTC 时刻；读不出（含空串）为 ``None``。
+def parse_timestamp(text: str) -> datetime | None:
+    """按 RFC-0003 规则 8 的读法严格读时间文本，返回 UTC 时刻；读不出（含空串）为 ``None``。
 
-    文法 ``^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?([Zz]|[+-][0-9]{2}:[0-9]{2})\\z``，
+    ``InvocationMetadata.deadline``（invocation.md §2）与 ``Envelope.time``（invocation.md §4，RFC-0009「信封」第 3 条）
+    共用这条文法：``^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?([Zz]|[+-][0-9]{2}:[0-9]{2})\\z``，
     年 0001–9999、月日按公历（含闰年）、时 00–23、分 00–59、秒 00–59（不认闰秒）、偏移的时 00–23 与分 00–59，换算成
     UTC 之后（不计小数）在 ``0001-01-01T00:00:00`` 到 ``9999-12-31T23:59:59`` 之间。``datetime`` 精确到微秒，更细的
     小数截断、不进位。
     """
-    match = _DEADLINE.fullmatch(text)
+    match = _TIMESTAMP.fullmatch(text)
     if match is None:
         return None
     year, month, day, hour, minute, second = (int(match.group(index)) for index in range(1, 7))
@@ -127,10 +128,22 @@ def parse_deadline(text: str) -> datetime | None:
         # 换算成 UTC 之后落到 0001 年之前或 9999 年之后
         return None
     # 范围按不计小数的时刻判定，所以 9999-12-31T23:59:59.999999999Z 仍然合法
-    if not _MIN_DEADLINE <= utc <= _MAX_DEADLINE:
+    if not _MIN_TIMESTAMP <= utc <= _MAX_TIMESTAMP:
         return None
     fraction = match.group(7) or ""
     return utc.replace(microsecond=int((fraction + "000000")[:6]))
+
+
+def format_time(time: datetime) -> str:
+    """把信封的时间写成 RFC 3339（RFC-0009「信封」第 3 条）：换算成 UTC、以 ``Z`` 结尾，如 ``2026-11-25T03:25:00.5Z``。
+
+    秒的小数去掉末尾的 0，全为 0 时不写小数点，最多六位（``datetime`` 只到微秒），六个 SDK 对同一时刻写出同一份文本
+    （精度以内）。年份按四位补零，不经 ``strftime``（各平台的 ``%Y`` 对 1000 年之前不一致）。``time`` 必须带时区，
+    ``Envelope`` 构造时已经核对过。
+    """
+    utc = time.astimezone(UTC)
+    fraction = f".{utc.microsecond:06d}".rstrip("0") if utc.microsecond else ""
+    return f"{utc.year:04d}-{utc.month:02d}-{utc.day:02d}T{utc.hour:02d}:{utc.minute:02d}:{utc.second:02d}{fraction}Z"
 
 
 def format_deadline(deadline: datetime) -> str:
@@ -146,9 +159,9 @@ def format_deadline(deadline: datetime) -> str:
 
 
 def effective_deadline(metadata: str, grpc: datetime | None) -> datetime | None:
-    """生效的截止时间（invocation.md §2）：``metadata`` 按 ``parse_deadline`` 读、读不出当作没有，与 gRPC 调用自身的截止时间
+    """生效的截止时间（invocation.md §2）：``metadata`` 按 ``parse_timestamp`` 读、读不出当作没有，与 gRPC 调用自身的截止时间
     （``grpc``，``None`` 为没有）取较早的一个；两者都没有时为 ``None``。"""
-    declared = parse_deadline(metadata)
+    declared = parse_timestamp(metadata)
     if grpc is not None:
         grpc = grpc.astimezone(UTC)
     if declared is None:
@@ -189,7 +202,7 @@ def to_metadata(ctx: Context) -> pb.InvocationMetadata:
 
 
 def to_proto_envelope(envelope: Envelope) -> pb.Envelope:
-    """把信封编码为协议消息（invocation.md §4）：``dataschema`` 原样，没有写空串。"""
+    """把信封编码为协议消息（invocation.md §4）：``time`` 按 ``format_time`` 写，``dataschema`` 原样，没有的都写空串。"""
     return pb.Envelope(
         topic=envelope.topic,
         id=envelope.id,
@@ -197,7 +210,7 @@ def to_proto_envelope(envelope: Envelope) -> pb.Envelope:
         type=envelope.type,
         spec_version=envelope.spec_version,
         subject=envelope.subject or "",
-        time=envelope.time or "",
+        time="" if envelope.time is None else format_time(envelope.time),
         data_content_type=envelope.data_content_type,
         data_schema=envelope.data_schema or "",
         data=envelope.data,
@@ -205,11 +218,17 @@ def to_proto_envelope(envelope: Envelope) -> pb.Envelope:
     )
 
 
-def from_proto_envelope(envelope: pb.Envelope) -> Envelope:
-    """把协议消息还原为信封；``specversion`` 固定 ``1.0``，``datacontenttype`` 缺省为 ``application/json``（RFC-0009）。
+def from_proto_envelope(envelope: pb.Envelope) -> Envelope | None:
+    """把宿主写来的协议消息还原为信封（invocation.md §4）；``time`` 不合 RFC-0003 规则 8 的读法时为 ``None``。
 
-    ``dataschema`` 的空串是没有，其余原样交出、不裁剪（invocation.md §4）。
+    ``specversion`` 固定 ``1.0``，``datacontenttype`` 缺省为 ``application/json``（RFC-0009）；``time`` 与 ``dataschema``
+    的空串是没有，``time`` 读成 UTC 时刻（比微秒更细的小数截断），``dataschema`` 原样交出、不裁剪。
     """
+    time = None
+    if envelope.time:
+        time = parse_timestamp(envelope.time)
+        if time is None:
+            return None
     return Envelope(
         topic=envelope.topic,
         id=envelope.id,
@@ -217,7 +236,7 @@ def from_proto_envelope(envelope: pb.Envelope) -> Envelope:
         type=envelope.type,
         spec_version=envelope.spec_version or "1.0",
         subject=envelope.subject or None,
-        time=envelope.time or None,
+        time=time,
         data_content_type=envelope.data_content_type or "application/json",
         data_schema=envelope.data_schema or None,
         data=envelope.data,
