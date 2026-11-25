@@ -59,11 +59,13 @@ from xihan_framework.plugin._convert import (
     REASON_FAILURE_WITHOUT_ERROR,
     effective_deadline,
     format_deadline,
+    from_proto_envelope,
     from_proto_error,
     from_status,
     parse_deadline,
     restore_context,
     to_metadata,
+    to_proto_envelope,
     to_proto_error,
     to_status,
 )
@@ -191,6 +193,33 @@ def test_deadlines_follow_the_vector(vector: VectorLoader) -> None:
         expected = case["text"]
         # 七位小数里 datetime 只有前六位，第七位总是 0；其余逐字相同
         assert (written[:26], written[26], written[27:]) == (expected[:26], "0", expected[27:]), case
+
+
+def _envelope(**fields: Any) -> Envelope:
+    return Envelope(topic="orders", id="e1", source="urn:test", type="orders.created", **fields)
+
+
+def _delivered(**fields: Any) -> Envelope:
+    """宿主写来的信封经 SDK 读出的样子。"""
+    return from_proto_envelope(pb.Envelope(topic="orders", id="e1", source="urn:test", type="orders.created", **fields))
+
+
+def test_envelopes_carry_the_data_schema_as_is() -> None:
+    schema = "https://example.com/schemas/order.json"
+    assert to_proto_envelope(_envelope(data_schema=schema)).data_schema == schema
+    assert to_proto_envelope(_envelope()).data_schema == ""
+    assert to_proto_envelope(_envelope(data_schema="")).data_schema == ""
+    # 不裁剪、不核对：只有空白的值由宿主拒绝那一项
+    assert to_proto_envelope(_envelope(data_schema=" urn:x ")).data_schema == " urn:x "
+    for text, expected in ((schema, schema), ("", None), (" ", " ")):
+        delivered = _delivered(data_schema=text)
+        assert delivered is not None
+        assert delivered.data_schema == expected, text
+    # 调试输出、相等比较与哈希都算上它
+    assert "data_schema='urn:a'" in repr(_envelope(data_schema="urn:a"))
+    assert _envelope(data_schema="urn:a") != _envelope(data_schema="urn:b")
+    assert _envelope(data_schema="urn:a") == _envelope(data_schema="urn:a")
+    assert hash(_envelope(data_schema="urn:a")) == hash(_envelope(data_schema="urn:a"))
 
 
 def test_callback_failures_follow_the_vector(vector: VectorLoader) -> None:

@@ -1011,6 +1011,7 @@ class Envelope(_message.Message):
     DATA_CONTENT_TYPE_FIELD_NUMBER: _builtins.int
     DATA_FIELD_NUMBER: _builtins.int
     EXTENSIONS_FIELD_NUMBER: _builtins.int
+    DATA_SCHEMA_FIELD_NUMBER: _builtins.int
     topic: _builtins.str
     """主题。"""
     id: _builtins.str
@@ -1029,6 +1030,8 @@ class Envelope(_message.Message):
     """`datacontenttype`；默认 `application/json`。"""
     data: _builtins.bytes
     """`data`。"""
+    data_schema: _builtins.str
+    """`dataschema`（URI，取值规则见 RFC-0009「信封」）；可空。同一协议版本里的新增字段，较早的对端忽略它（invocation.md §4）。"""
     @_builtins.property
     def extensions(self) -> _containers.ScalarMap[_builtins.str, _builtins.str]:
         """扩展属性。"""
@@ -1046,10 +1049,11 @@ class Envelope(_message.Message):
         data_content_type: _builtins.str = ...,
         data: _builtins.bytes = ...,
         extensions: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
+        data_schema: _builtins.str = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["data", b"data", "data_content_type", b"data_content_type", "extensions", b"extensions", "id", b"id", "source", b"source", "spec_version", b"spec_version", "subject", b"subject", "time", b"time", "topic", b"topic", "type", b"type"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["data", b"data", "data_content_type", b"data_content_type", "data_schema", b"data_schema", "extensions", b"extensions", "id", b"id", "source", b"source", "spec_version", b"spec_version", "subject", b"subject", "time", b"time", "topic", b"topic", "type", b"type"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 

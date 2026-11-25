@@ -189,7 +189,7 @@ def to_metadata(ctx: Context) -> pb.InvocationMetadata:
 
 
 def to_proto_envelope(envelope: Envelope) -> pb.Envelope:
-    """把信封编码为协议消息。"""
+    """把信封编码为协议消息（invocation.md §4）：``dataschema`` 原样，没有写空串。"""
     return pb.Envelope(
         topic=envelope.topic,
         id=envelope.id,
@@ -199,13 +199,17 @@ def to_proto_envelope(envelope: Envelope) -> pb.Envelope:
         subject=envelope.subject or "",
         time=envelope.time or "",
         data_content_type=envelope.data_content_type,
+        data_schema=envelope.data_schema or "",
         data=envelope.data,
         extensions=dict(envelope.extensions),
     )
 
 
 def from_proto_envelope(envelope: pb.Envelope) -> Envelope:
-    """把协议消息还原为信封；``specversion`` 固定 ``1.0``，``datacontenttype`` 缺省为 ``application/json``（RFC-0009）。"""
+    """把协议消息还原为信封；``specversion`` 固定 ``1.0``，``datacontenttype`` 缺省为 ``application/json``（RFC-0009）。
+
+    ``dataschema`` 的空串是没有，其余原样交出、不裁剪（invocation.md §4）。
+    """
     return Envelope(
         topic=envelope.topic,
         id=envelope.id,
@@ -215,6 +219,7 @@ def from_proto_envelope(envelope: pb.Envelope) -> Envelope:
         subject=envelope.subject or None,
         time=envelope.time or None,
         data_content_type=envelope.data_content_type or "application/json",
+        data_schema=envelope.data_schema or None,
         data=envelope.data,
         extensions=dict(envelope.extensions),
     )

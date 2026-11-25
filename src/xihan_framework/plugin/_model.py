@@ -62,6 +62,9 @@ class Subscription:
 class Envelope:
     """CloudEvents 1.0 信封的平铺（RFC-0009）；``extensions`` 是扩展属性（如 ``xihantenant``）的只读映射。
 
+    ``data_schema`` 是 CloudEvents 的 ``dataschema``（ADR-0305），``None`` 为没有；收到与发布都原样，SDK 不核对、
+    不改写（invocation.md §4），写成空串与 ``None`` 一样是没有。
+
     ``extensions`` 可以照常读、迭代与比较，写操作抛出 ``TypeError``；信封可以 ``copy.deepcopy``、``pickle`` 与
     ``dataclasses.asdict``（结果里的 ``extensions`` 是普通 ``dict``），也可以哈希。
     """
@@ -74,6 +77,7 @@ class Envelope:
     subject: str | None = None
     time: str | None = None
     data_content_type: str = "application/json"
+    data_schema: str | None = None
     data: bytes = b""
     extensions: Mapping[str, str] = field(default_factory=dict)
 
