@@ -16,8 +16,7 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 import grpc
 import pytest
@@ -628,7 +627,9 @@ def test_binding_properties_are_handed_over_as_sent() -> None:
     assert (queue.value, queue.properties) == ("amqp://mq.internal", many)
     assert (cache.value, cache.properties, len(cache.properties)) == ("redis.internal:6379", {}, 0)
     # 交出的是只读映射，也是一份拷贝：作者改不动绑定，之后改动来源也不影响它
-    assert isinstance(db.properties, MappingProxyType)
+    with pytest.raises(TypeError):
+        cast("dict[str, str]", db.properties)["accessKey"] = "changed"
+    assert db.properties["accessKey"] == "lower"
     source = {"username": "app"}
     copied = Binding("db", "connection:relational", "", source)
     source["username"] = "changed"

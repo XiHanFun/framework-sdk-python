@@ -5,11 +5,11 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import Enum, StrEnum
-from types import MappingProxyType
 
 from xihan_framework._json import JsonValue
 from xihan_framework.invocation import Context
 from xihan_framework.plugin._configuration import decode_section
+from xihan_framework.plugin._frozen import freeze, freeze_redacted
 from xihan_framework.primitives import ERROR_CODE_INVALID_ARGUMENT, Error, FrameworkError, LifecycleState, Result, Unit
 
 # 主题文法（RFC-0009「信封」）
@@ -60,7 +60,11 @@ class Subscription:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Envelope:
-    """CloudEvents 1.0 信封的平铺（RFC-0009）；``extensions`` 是扩展属性，如 ``xihantenant``。"""
+    """CloudEvents 1.0 信封的平铺（RFC-0009）；``extensions`` 是扩展属性（如 ``xihantenant``）的只读映射。
+
+    ``extensions`` 可以照常读、迭代与比较，写操作抛出 ``TypeError``；信封可以 ``copy.deepcopy``、``pickle`` 与
+    ``dataclasses.asdict``（结果里的 ``extensions`` 是普通 ``dict``），也可以哈希。
+    """
 
     topic: str
     id: str
@@ -74,8 +78,8 @@ class Envelope:
     extensions: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """把扩展属性复制成只读映射。"""
-        object.__setattr__(self, "extensions", MappingProxyType(dict(self.extensions)))
+        """把扩展属性复制成只读映射：之后改动传入的映射不影响这个信封。"""
+        object.__setattr__(self, "extensions", freeze(self.extensions))
 
 
 type EventHandler = Callable[[Context, Envelope, int], Awaitable[Result[Unit]]]
@@ -129,22 +133,24 @@ class Binding:
     ``name`` 是清单里的绑定名，``type`` 是资源类型，``value`` 是主值（连接串或地址）：来源只给了属性、没有给主值时为空串，
     不是错误。``properties`` 是其余属性（属性名到属性值）的只读映射：属性名区分大小写、原样交出（``accessKey`` 与
     ``AccessKey`` 是两项）；没有属性时是空映射（按较早的规范实现的宿主不发这个字段，读到的也是空映射），值为空的属性照样在
-    里面，各项的先后没有含义。运行时不核对属性名的文法与上限，那是宿主的事。
+    里面，各项的先后没有含义。运行时不核对属性名的文法与上限，那是宿主的事。写操作抛出 ``TypeError``。
 
     主值与属性值可能是凭据，不要写进日志、错误与其他诊断输出：``repr``（``str``、``print`` 与日志的 ``%s`` / ``%r`` 也是它）
-    只带绑定名、类型与排好序的属性名，不带主值与属性值。
+    只带绑定名、类型与排好序的属性名，不带主值与属性值；单独打印 ``properties`` 同样只带属性名（值写成 ``...``）。
+    ``json.dumps(binding.properties)``、``dict(binding.properties)`` 与 ``dataclasses.asdict(binding)`` 是作者自己取值，
+    照样带出值。绑定可以 ``copy.deepcopy``、``pickle`` 与 ``dataclasses.asdict``（结果里的 ``properties`` 是普通
+    ``dict``），也可以哈希。
     """
 
     name: str
     type: str
     # repr=False：按字段的 repr 标记打印的工具（pprint 之类）同样不带主值与属性值
     value: str = field(repr=False)
-    # hash=False：只读映射不可哈希，绑定照旧可哈希（相等的绑定哈希相同，属性不同的绑定不相等）
-    properties: Mapping[str, str] = field(default_factory=dict, repr=False, hash=False)
+    properties: Mapping[str, str] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         """把属性复制成只读映射：之后改动传入的映射不影响这个绑定，作者也改不动它。"""
-        object.__setattr__(self, "properties", MappingProxyType(dict(self.properties)))
+        object.__setattr__(self, "properties", freeze_redacted(self.properties))
 
     def __repr__(self) -> str:
         """调试输出：只带绑定名、类型与属性名，不带主值与属性值（lifecycle.md §7.2）。"""
