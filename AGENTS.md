@@ -96,7 +96,7 @@ framework-sdk-python 是 [XiHan Spec](https://github.com/XiHanFun/framework-spec
   1. `git -C spec fetch origin` 后 `git -C spec checkout <提交或标签>`；只指向 framework-spec 已推送的提交（RFC-0024「实现钉规范」，CI 检出子模块也要拉得到）。
   2. 读这段范围的规范改动（`git -C spec log --oneline <旧>..<新>` 与 `spec/CHANGELOG.md`），补实现；协议变了重新生成协议代码；新向量回放或列为缺口。
   3. 跑全部门禁。
-  4. 指针与它带来的实现、README 与文档页的同步放在同一提交，提交说明写「规范指针升到 <短哈希>」并引用 ADR。
+  4. 指针与它带来的实现、README 与文档页的同步放在同一提交，说明写实现的结果并注 ADR；只升指针的提交写 `build(spec): 规范指针升到 <短哈希>（ADR-NNNN）`。
 
 ## 代码规范
 
@@ -146,6 +146,7 @@ framework-sdk-python 是 [XiHan Spec](https://github.com/XiHanFun/framework-spec
 ## Git 与提交
 
 - 使用 Conventional Commits：`<type>(<scope>): <中文说明>`，scope 用本仓库的模块名（`primitives`、`manifest`、`invocation`、`pipeline`、`operation`、`plugin`、`conformance`）或 `spec`、`docs`、`build`、`ci`。
+- 提交信息只写一行标题，不写正文。说明一句话讲这次改动的结果，不超过 40 个字（汉字、字母、数字、标点各算一个，末尾的 `（ADR-NNNN）` 不计）；不再用「：」「；」往下展开，不罗列文件、成员、取值与改前改后，不写测试数量与门禁结果，这些细节写进 文档页、ADR 或 PR 描述。细则见 `commit-msg` 技能。
 - 保留用户已有和无关改动；不要 reset、checkout 或清理它们，只暂存自己的文件。
 - 每项能力或独立修复单独提交；实现、测试、README 与规范指针属于同一闭环时放在同一提交。
 - 提交前检查 `git diff --check` 和相关门禁。
