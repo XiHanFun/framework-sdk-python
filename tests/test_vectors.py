@@ -22,12 +22,13 @@ REPLAYED = frozenset(
         "plugin/binding-properties.json",  # test_plugin_runtime（reading；names、limits、delivery 与 json 是宿主一侧的）
         "plugin/callback-status.json",  # test_plugin_protocol
         "plugin/deadlines.json",  # test_plugin_protocol
-        "plugin/envelope-times.json",  # test_plugin_protocol（host 档；SDK 读宿主写来的 time 是同一条文法）
+        "plugin/envelope-times.json",  # test_plugin_protocol（valid 与 invalid：SDK 读宿主写来的 time 是同一条文法）
         "plugin/error-reading.json",  # test_plugin_protocol
         "plugin/handshake-lines.json",  # test_plugin_protocol
         "plugin/host-addresses.json",  # test_plugin_protocol
         "plugin/plugin-messages.json",  # test_plugin_protocol
         "plugin/protocol-versions.json",  # test_plugin_protocol
+        "plugin/sdk-envelope-times.json",  # test_plugin_protocol（取 microseconds 一项）、test_plugin_runtime（unreadable）
         "primitives/baggage-keys.json",  # test_primitives、test_invocation
         "primitives/capability-requirements.json",  # test_manifest
         "primitives/error-codes.json",  # test_primitives

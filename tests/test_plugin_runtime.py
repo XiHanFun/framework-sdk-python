@@ -1050,7 +1050,9 @@ def test_invoke_stream_reads_only_the_first_frame() -> None:
 # 投递（invocation.md §4）
 
 
-def test_deliveries_are_checked_in_order() -> None:
+def test_deliveries_are_checked_in_order(vector: Callable[[str, str], Any]) -> None:
+    unreadable = [case["text"] for case in vector("plugin", "sdk-envelope-times")["unreadable"]]
+
     async def scenario() -> None:
         async with running(build(Probe())) as plugin:
             await plugin.handshake()
@@ -1068,6 +1070,12 @@ def test_deliveries_are_checked_in_order() -> None:
                     plugin.stub.HandleEvent(
                         deliver(topic, "a", "competing", time="2026-11-25T03:25:00"), metadata=session()
                     ),
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                )
+            # sdk-envelope-times.json 的 unreadable 每一条都以 InvalidArgument 拒绝（ADR-0310）
+            for text in unreadable:
+                await expect_code(
+                    plugin.stub.HandleEvent(deliver("probe.events", "a", "competing", time=text), metadata=session()),
                     grpc.StatusCode.INVALID_ARGUMENT,
                 )
             # 找订阅先于就绪：没人订阅的主题报 unsubscribed，订阅了的报不可用

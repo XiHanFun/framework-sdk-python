@@ -216,7 +216,8 @@ def _delivered_time(text: str) -> datetime | None:
 
 
 def test_envelope_times_follow_the_vector(vector: VectorLoader) -> None:
-    # 向量在 host 档：valid 与 invalid 是宿主读插件写来的时间，SDK 读宿主写来的时间按同一条文法；written 是宿主写给插件的
+    # valid 与 invalid 是宿主读插件写来的时间，SDK 读宿主写来的时间按同一条文法；written 是宿主写给插件的（七位小数、+00:00），
+    # SDK 读得出，但不是 SDK 写出的样子（ADR-0310）
     times = vector("plugin", "envelope-times")
     for case in times["valid"]:
         assert _delivered_time(case["text"]) == (None if case["utc"] is None else _utc(case["utc"])), case["text"]
@@ -234,6 +235,34 @@ def _instant(text: str) -> datetime:
     offset = "+00:00" if match[3] == "Z" else match[3]
     base = datetime.fromisoformat(match[1] + offset)
     return base.replace(microsecond=int(((match[2] or "") + "000000")[:6])).astimezone(UTC)
+
+
+#: ``datetime`` 的精度在 ``sdk-envelope-times.json`` 里的名字：微秒，写出时最多六位小数。
+PRECISION = "microseconds"
+
+
+def _authored(text: str) -> datetime:
+    """``writing`` 的 ``instant``：按投递时读宿主文本的读法读成 UTC 时刻（截断到微秒），再换回原文的偏移，好核对写出时换算成 UTC。"""
+    utc = parse_timestamp(text)
+    assert utc is not None, text
+    offset = re.search(r"([+-])([0-9]{2}):([0-9]{2})\Z", text)
+    if offset is None:
+        return utc
+    span = timedelta(hours=int(offset[2]), minutes=int(offset[3]))
+    return utc.astimezone(timezone(-span if offset[1] == "-" else span))
+
+
+def test_sdk_envelope_times_follow_the_vector_at_microsecond_precision(vector: VectorLoader) -> None:
+    # SDK 一侧的写出与读入（ADR-0310），取微秒那一项；unreadable 经 gRPC 的投递另在 test_plugin_runtime 核对
+    times = vector("plugin", "sdk-envelope-times")
+    assert times["precisions"][PRECISION] == 6
+    for case in times["writing"]:
+        authored = _envelope() if case["instant"] is None else _envelope(time=_authored(case["instant"]))
+        assert to_proto_envelope(authored).time == case["text"][PRECISION], case["name"]
+    for case in times["reading"]:
+        assert _delivered_time(case["text"]) == _utc(case["utc"][PRECISION]), case["name"]
+    for case in times["unreadable"]:
+        assert _delivered(time=case["text"]) is None, case["name"]
 
 
 #: 六个 SDK 共用的写出用例：作者给的时刻 → SDK 写出的 ``time``（UTC、``Z``、小数去掉末尾的 0）。
