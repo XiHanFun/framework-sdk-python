@@ -1,5 +1,5 @@
 """插件协议的数据规则：握手行、回调端点、截止时间与信封的时间、回调失败的映射与消息键的向量，协议消息的转换、运行时的消息
-目录、配置节的类型化读取、回调的本地核对、日志格式与插件声明的核对。"""
+目录、配置节的类型化读取、回调的本地核对、日志格式与遮值、插件声明的核对。"""
 
 import io
 import json
@@ -36,6 +36,7 @@ from xihan_framework.plugin import (
     MESSAGE_UNAVAILABLE,
     PERMISSION_INVOKE,
     PERMISSION_PUBLISH,
+    Binding,
     Configuration,
     Endpoint,
     Envelope,
@@ -779,6 +780,44 @@ def test_logs_are_json_lines_with_the_host_levels() -> None:
     assert entries[2]["message"] == "line\nbreak é"
     assert (entries[2]["plugin"], entries[2]["attempt"], entries[2]["logger"]) == ("xihan.a.b", 2, "tests.plugin.log")
     assert "ValueError: boom" in entries[5]["exception"]
+
+
+def test_logs_carry_only_the_names_of_binding_properties() -> None:
+    binding = Binding("db", "connection:relational", "Server=db;Password=s3cr3t", {"password": "s3cr3t", "User": "sa"})
+    configuration = Configuration(section={}, bindings=(binding,))
+    stream = io.StringIO()
+    logger = logging.getLogger("tests.plugin.redaction")
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
+    handler = JsonLogHandler(stream)
+    logger.addHandler(handler)
+    try:
+        logger.info(
+            "configured %s with %s",
+            binding,
+            binding.properties,
+            extra={
+                "properties": binding.properties,
+                "nested": {"bindings": [binding.properties], "pair": (binding.name, binding.properties)},
+                "binding": binding,
+                "configuration": configuration,
+                "extensions": Envelope(topic="t", id="e", source="s", type="x", extensions={"k": "v"}).extensions,
+            },
+        )
+        # 作者自己取出的值照样写出
+        logger.info("copied", extra={"copied": dict(binding.properties)})
+    finally:
+        logger.removeHandler(handler)
+    redacted, copied = (json.loads(line) for line in stream.getvalue().splitlines())
+    # 属性名按升序，与绑定写成 JSON 时的 propertyNames 同一口径（ADR-0299）
+    assert redacted["properties"] == ["User", "password"]
+    assert redacted["nested"] == {"bindings": [["User", "password"]], "pair": ["db", ["User", "password"]]}
+    written = json.dumps(redacted)
+    assert not any(value in written for value in ("s3cr3t", "Server=db", '"sa"', "'sa'")), written
+    assert redacted["message"] == "configured " + repr(binding) + " with {'User': ..., 'password': ...}"
+    # 扩展属性不是凭据，照常写出
+    assert redacted["extensions"] == {"k": "v"}
+    assert copied["copied"] == {"password": "s3cr3t", "User": "sa"}
 
 
 def test_topics_follow_the_messaging_grammar() -> None:
