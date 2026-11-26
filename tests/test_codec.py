@@ -68,6 +68,25 @@ class Positive:
             raise ValueError("the value must be positive")
 
 
+@dataclass(frozen=True)
+class Clash:
+    first: int = field(metadata=json_field("value"))
+    second: int = field(metadata=json_field("value"))
+
+
+@dataclass(frozen=True)
+class Shadow:
+    value: int
+    other: int = field(default=0, metadata=json_field("value"))
+
+
+@dataclass(frozen=True)
+class Cased:
+    value: int
+    other: int = field(default=0, metadata=json_field("Value"))
+    _value: int = field(default=0, metadata=json_field("value"))
+
+
 def decode(target: object, value: JsonValue) -> object:
     """编译并解码。"""
     return compile_decoder(target)(value)
@@ -180,6 +199,18 @@ def test_unsupported_types_fail_when_compiling() -> None:
     for target in [int | str, dict[int, str], set[int], bytes]:
         with pytest.raises(TypeError):
             compile_decoder(target)
+
+
+def test_two_fields_with_the_same_json_name_fail_when_building_the_metadata() -> None:
+    # 与 .NET 建元数据时相同：两个字段写成同一个成员名即报错，不让后一个静默覆盖前一个；成员名区分大小写，_ 开头的字段不写
+    for target in (Clash, Shadow):
+        with pytest.raises(TypeError, match="same JSON name 'value'"):
+            compile_decoder(target)
+    for value in (Clash(1, 2), Shadow(1, 2)):
+        with pytest.raises(TypeError, match="same JSON name 'value'"):
+            encode(value)
+    assert encode(Cased(1, 2, 3)) == {"value": 1, "Value": 2}
+    assert decode(Cased, {"value": 1, "Value": 2}) == Cased(1, 2)
 
 
 def test_encoding_rejects_values_without_a_json_form() -> None:

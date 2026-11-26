@@ -2,7 +2,8 @@
 
 编码按值的运行期类型：原语原样；有 ``to_json_value()`` 的对象（SDK 的原语与用户类型）用它；枚举取 ``value``；
 dataclass 按字段声明顺序写成对象（名字可由 ``json_field`` 改写，``_`` 开头的字段不写）；映射按键的字典序；
-列表与元组写成数组。
+列表与元组写成数组。dataclass 的两个字段写成同一个成员名（区分大小写）时，编码与编译解码器都抛出 ``TypeError``，与 .NET
+建序列化元数据时相同，不让后一个静默覆盖前一个。
 
 解码按目标类型先编译成解码函数（注册时就发现不支持的类型），输入是过了共同检查的 JSON 值（``_json.parse``），
 按 RFC-0011 规则 2 的语义解码（ADR-0236）：对象的成员按文本顺序逐个解码，第一处不符即抛出 ``DecodeError``，只带
@@ -85,6 +86,28 @@ def json_field(name: str | None = None, *, omit_none: bool = False) -> dict[str,
     return metadata
 
 
+def _json_fields(target: type) -> list[tuple[dataclasses.Field[Any], str]]:
+    """dataclass 写进 JSON 的字段与它们的成员名，按声明顺序；``_`` 开头的字段不写。
+
+    两个字段的成员名相同（区分大小写，含一个改名、一个没改名的）时抛出 ``TypeError``：编码时后一个会覆盖前一个，解码时只认
+    其中一个，交出去与读进来的都不是作者以为的值（与 .NET 建序列化元数据时报错相同）。
+    """
+    named: list[tuple[dataclasses.Field[Any], str]] = []
+    owners: dict[str, str] = {}
+    for field in dataclasses.fields(target):
+        if field.name.startswith("_"):
+            continue
+        name = str(field.metadata.get(JSON_NAME, field.name))
+        owner = owners.setdefault(name, field.name)
+        if owner != field.name:
+            raise TypeError(
+                f"The fields '{owner}' and '{field.name}' of the dataclass '{target.__qualname__}' "
+                f"have the same JSON name '{name}'."
+            )
+        named.append((field, name))
+    return named
+
+
 def encode(value: object) -> JsonValue:
     """把值编码成 JSON 值；编码不了的值抛出 ``TypeError``。"""
     if value is None or isinstance(value, (bool, int, float, str)):
@@ -97,13 +120,11 @@ def encode(value: object) -> JsonValue:
         return encode(value.value)
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         members: dict[str, JsonValue] = {}
-        for field in dataclasses.fields(value):
-            if field.name.startswith("_"):
-                continue
+        for field, name in _json_fields(type(value)):
             member = getattr(value, field.name)
             if member is None and field.metadata.get(JSON_OMIT_NONE):
                 continue
-            members[str(field.metadata.get(JSON_NAME, field.name))] = encode(member)
+            members[name] = encode(member)
         return members
     if isinstance(value, Mapping):
         # 映射的键按字典序写出，输出不随插入顺序变化（规范按 JSON 值比较，成员顺序不是契约）；dataclass 与 SDK 原语保持声明顺序
@@ -405,11 +426,11 @@ def _compile_dataclass(target: type, cache: dict[object, Decoder]) -> Decoder:
     members: dict[str, tuple[str, Decoder]] = {}
     required: list[str] = []
     absent_maybes: list[str] = []
-    for field in dataclasses.fields(target):
-        if not field.init or field.name.startswith("_"):
+    for field, name in _json_fields(target):
+        if not field.init:
             continue
         hint = hints[field.name]
-        members[str(field.metadata.get(JSON_NAME, field.name))] = (field.name, _compile(hint, cache))
+        members[name] = (field.name, _compile(hint, cache))
         if field.default is dataclasses.MISSING and field.default_factory is dataclasses.MISSING:
             # 没有缺省值的 Maybe 字段缺少时为无值，不算必填
             (absent_maybes if hint is Maybe or get_origin(hint) is Maybe else required).append(field.name)
