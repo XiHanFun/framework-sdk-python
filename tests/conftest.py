@@ -22,3 +22,14 @@ def _load_vector(group: str, name: str) -> Any:
 def vector() -> Callable[[str, str], Any]:
     """按组名与向量名读取一致性向量，不复制向量文件。"""
     return _load_vector
+
+
+def _utf16_text(units: list[str]) -> str:
+    """按 UTF-16 码元组字符串（RFC-0012「一致性」）：成对的代理项合成一个码点，孤立的留作代理项码点。"""
+    return b"".join(bytes.fromhex(unit) for unit in units).decode("utf-16-be", "surrogatepass")
+
+
+@pytest.fixture
+def utf16() -> Callable[[list[str]], str]:
+    """向量里以 ``utf16`` 列出码元的样例组成字符串：JSON 字符串写不出孤立的代理项。"""
+    return _utf16_text

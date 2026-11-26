@@ -908,12 +908,19 @@ def test_catalogs_resolve_strictly_and_fall_back_to_the_description() -> None:
     assert not primitives.is_message_key(long_key + "b")
 
 
-def test_baggage_values_follow_the_vectors(vector: VectorLoader) -> None:
+def test_baggage_values_follow_the_vectors(vector: VectorLoader, utf16: Callable[[list[str]], str]) -> None:
     values = vector("primitives", "baggage-keys")["values"]
     for value in values["acceptable"]:
         assert primitives.is_baggage_value_acceptable(value), value
     for value in values["unacceptable"]:
         assert not primitives.is_baggage_value_acceptable(value), value
+    # 孤立的代理项（ADR-0321）：Python 的 str 里不能有代理项码点；成对的码元合成平面以外的一个字符，照常合法
+    for case in values["acceptableUtf16"]:
+        assert primitives.is_baggage_value_acceptable(utf16(case["utf16"])), case["name"]
+    for case in values["unacceptableUtf16"]:
+        assert not primitives.is_baggage_value_acceptable(utf16(case["utf16"])), case["name"]
+    # 进程里拼出的两个代理项码点不是一个字符，同样不合
+    assert not primitives.is_baggage_value_acceptable("t" + chr(0xD83D) + chr(0xDE00))
     # 长度按 UTF-16 码元计：基本多文种平面以外的字符算两个，按码点计会把 255 个 a 加一个表情算成 256
     assert primitives.is_baggage_value_acceptable("a" * 254 + "\U0001f600")
     assert not primitives.is_baggage_value_acceptable("a" * 255 + "\U0001f600")

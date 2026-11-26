@@ -428,12 +428,17 @@ def test_other_exceptions_propagate() -> None:
     assert asyncio.run(main()) == 0
 
 
-def test_contexts_drop_external_baggage_but_reject_derived_values(vector: Callable[[str, str], Any]) -> None:
+def test_contexts_drop_external_baggage_but_reject_derived_values(
+    vector: Callable[[str, str], Any], utf16: Callable[[list[str]], str]
+) -> None:
     values = vector("primitives", "baggage-keys")["values"]
-    for value in values["acceptable"]:
+    # 孤立的代理项的样例以 UTF-16 码元列出（ADR-0321），与以字符串列出的同一条约束一起回放
+    acceptable = [*values["acceptable"], *(utf16(case["utf16"]) for case in values["acceptableUtf16"])]
+    unacceptable = [*values["unacceptable"], *(utf16(case["utf16"]) for case in values["unacceptableUtf16"])]
+    for value in acceptable:
         assert Context(baggage={BAGGAGE_TENANT: value}).tenant == value
         assert Context().with_baggage(BAGGAGE_CORRELATION, value).correlation == value
-    for value in values["unacceptable"]:
+    for value in unacceptable:
         ctx = Context(baggage={BAGGAGE_TENANT: value, BAGGAGE_IDEMPOTENCY_KEY: value, "xihan.note": value})
         assert ctx.tenant is None, value
         # 幂等键不按这条丢弃，交给 Idempotency 阶段拒绝；未登记的键不出进程，也不受约束

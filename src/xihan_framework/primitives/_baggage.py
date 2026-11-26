@@ -42,9 +42,12 @@ MAX_BAGGAGE_VALUE_LENGTH: Final = 256
 
 
 def is_baggage_value_acceptable(value: str) -> bool:
-    """判断已登记键的值能否进入调用上下文：非空、按 UTF-16 码元计不超过 256、不含 U+0000–U+001F 与 U+007F–U+009F。
+    """判断已登记键的值能否进入调用上下文：非空、按 UTF-16 码元计不超过 256、不含 U+0000–U+001F 与 U+007F–U+009F，
+    也不含孤立的代理项。
 
-    长度与 .NET、JavaScript、Java 的字符串长度一致：基本多文种平面以外的字符算两个码元。``xihan.idempotency-key``
+    长度与 .NET、JavaScript、Java 的字符串长度一致：基本多文种平面以外的字符算两个码元。孤立的代理项按 RFC-0001
+    「孤立的代理项」判定（ADR-0321）：Python 的 ``str`` 以码点存放，任何 U+D800–U+DFFF 的码点都编码不成 UTF-8，成对的两个
+    也不是一个字符；值出进程时编成 UTF-8，宽松的编码会让只差在它上面的两个值到了下游是同一个。``xihan.idempotency-key``
     不按这条丢弃，由 Idempotency 阶段以校验错误拒绝。
     """
     if not value:
@@ -53,7 +56,7 @@ def is_baggage_value_acceptable(value: str) -> bool:
     for character in value:
         code = ord(character)
         # 控制字符同 .NET 的 char.IsControl：换行能伪造日志行，这些值会写进日志、审计与消息信封
-        if code <= 0x1F or 0x7F <= code <= 0x9F:
+        if code <= 0x1F or 0x7F <= code <= 0x9F or 0xD800 <= code <= 0xDFFF:
             return False
         units += 2 if code > 0xFFFF else 1
     return units <= MAX_BAGGAGE_VALUE_LENGTH
