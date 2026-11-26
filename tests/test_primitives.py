@@ -735,6 +735,25 @@ def test_wire_encodings_that_cannot_be_written_raise() -> None:
     assert ok(math.nan).to_json() == '{"ok":true,"value":"NaN"}'
 
 
+class _Odd(int):
+    """覆写了 ``__str__`` 与 ``__repr__`` 的整数：写出时仍按它的十进制值。"""
+
+    def __str__(self) -> str:
+        """不是数字的文本。"""
+        return "odd"
+
+    def __repr__(self) -> str:
+        """不是数字的文本。"""
+        return "_Odd()"
+
+
+def test_integers_are_written_by_their_decimal_value() -> None:
+    # 值模型（RFC-0010「模板」）：整数写十进制，不取子类覆写的 __str__；以前写成 odd，交出去的不是 JSON
+    assert _json.dumps(_Odd(42)) == "42"
+    assert _json.dumps({"n": [_Odd(-7)]}, strict=True) == '{"n":[-7]}'
+    assert ok(_Odd(5)).to_json() == '{"ok":true,"value":5}'
+
+
 def test_strict_json_writing_rejects_surrogate_code_points() -> None:
     # 响应编码写不成合法的 JSON 文本即写不出（RFC-0011 规则 10 的「编码」，ADR-0318）：值、成员名与数组元素里的代理项码点
     # 都拒收，不写成转义；Python 的 str 里两个代理项码点也不是一个字符，同样拒收

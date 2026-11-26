@@ -725,8 +725,6 @@ def test_responses_that_do_not_pass_the_json_text_checks_cannot_be_written() -> 
         "members.nested": {"outer": [Boxed(Twice([("b", True), ("b", False)]))]},
         # Python 的 str 里两个代理项码点不是一个字符：映射的键也一样（RFC-0001「写出与转交」，ADR-0319）
         "members.pair": {chr(0xD83D) + chr(0xDE00): 1},
-        # 共同检查也查语法：int 的子类按自己的 __str__ 写出，写成数字以外的文本同样写不出
-        "numbers.shown": [Shown(1)],
     }
     writable: dict[str, tuple[object, bytes]] = {
         "depths.arrays-at-limit": (nested_arrays(64), b"[" * 64 + b"]" * 64),
@@ -738,6 +736,8 @@ def test_responses_that_do_not_pass_the_json_text_checks_cannot_be_written() -> 
             Twice([("a", {"a": 1}), ("b", [{"a": 2}, {"a": 3}])]),
             b'{"a":{"a":1},"b":[{"a":2},{"a":3}]}',
         ),
+        # int 的子类按十进制值写出，不取它覆写的 __str__（以前写成 ORD-1，没过共同检查）
+        "numbers.shown": ([Shown(1)], b"[1]"),
     }
     registry = Registry()
     for id, value in unwritable.items():

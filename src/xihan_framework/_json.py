@@ -255,7 +255,8 @@ def _write(value: JsonValue, parts: list[str], depth: int | None, strict: bool, 
         parts.append("false")
     elif isinstance(value, int):
         if INT64_MIN <= value <= INT64_MAX:
-            parts.append(str(value))
+            # int.__repr__ 写的是十进制值，不取子类覆写的 __str__ 与 __repr__（RFC-0010「模板」）
+            parts.append(int.__repr__(value))
         else:
             _write_float(int_to_float(value), parts, strict)
     elif isinstance(value, JsonNumber):
