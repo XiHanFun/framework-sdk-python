@@ -49,6 +49,8 @@ CALLBACK_PUBLISH: Final = "publish"
 REASON_NO_CALLBACK_ENDPOINT: Final = "no supported callback endpoint"
 #: ``Host.Publish`` 的错误所在的阶段（invocation.md §5）。
 PHASE_PUBLISH: Final = "publish"
+#: 客户端已关闭之后的回调在 ``reason`` 里写的说明（invocation.md §5，ADR-0328）：状态名按 ``Unavailable``。
+REASON_CLIENT_CLOSED: Final = "the host client is closed"
 
 # gRPC 状态码 0–16 的 PascalCase 名字（invocation.md §3），下标即状态码；各语言的 gRPC 库数值相同
 _STATUS_NAMES: Final = (
@@ -72,9 +74,10 @@ _STATUS_NAMES: Final = (
 )
 # 本地取消的调用没有宿主给的状态消息，reason 的说明写这句
 _LOCALLY_CANCELLED: Final = "the call was cancelled"
-# 映射表里单独用到的两个状态码
+# 映射表里单独用到的三个状态码
 _CANCELLED: Final[int] = grpc.StatusCode.CANCELLED.value[0]
 _DEADLINE_EXCEEDED: Final[int] = grpc.StatusCode.DEADLINE_EXCEEDED.value[0]
+_UNAVAILABLE: Final[int] = grpc.StatusCode.UNAVAILABLE.value[0]
 
 # 运行时把宿主客户端放进每次调用与投递的上下文；只在本包里写入
 HOST_ITEM: Final = ItemKey["Host"]("xihan.plugin.host")
@@ -109,9 +112,20 @@ class Host:
     与宿主给出同样的错误：所需权限既在清单 ``permissions`` 里、也在 ``Configure`` 授予的权限里，否则
     ``plugins.callback.denied``；上下文的租户必须是插件此刻正在处理的某个调用或投递的租户，否则
     ``plugins.callback.tenant_denied``。每次调用都在元数据 ``xihan-plugin-session`` 里带会话令牌，宿主以插件身份执行。
+    运行时收尾时关闭客户端（``close``），之后的回调不发请求、不重新连接，结果是 ``plugins.host.unavailable``。
     """
 
-    __slots__ = ("_channel", "_declared", "_endpoint", "_granted", "_plugin_id", "_session", "_stub", "_tenants")
+    __slots__ = (
+        "_channel",
+        "_closed",
+        "_declared",
+        "_endpoint",
+        "_granted",
+        "_plugin_id",
+        "_session",
+        "_stub",
+        "_tenants",
+    )
 
     def __init__(
         self,
@@ -135,6 +149,7 @@ class Host:
         self._granted: frozenset[str] = frozenset()
         self._channel = None if target is None else grpc.aio.insecure_channel(target)
         self._stub = None if self._channel is None else pb_grpc.HostStub(self._channel)
+        self._closed = False
 
     @property
     def endpoint(self) -> Endpoint | None:
@@ -151,7 +166,8 @@ class Host:
 
         元数据取自 ``ctx``：当前 Span 的 traceparent、截止时间与已登记的 Baggage（``to_metadata``），截止时间同时是 gRPC
         调用的截止时间；``ctx`` 的取消信号触发时取消这次 gRPC 调用。gRPC 失败按 invocation.md §5 的表映射为原语层错误，
-        宿主写来的 ``Status`` 按 §3 的读入规则处理。
+        宿主写来的 ``Status`` 按 §3 的读入规则处理。客户端已关闭时不发请求，结果是 ``plugins.host.unavailable``，排在载荷的
+        编码之后（ADR-0328）。
         """
         refused = self._refuse(ctx, CALLBACK_INVOKE)
         if refused is not None:
@@ -166,6 +182,8 @@ class Host:
                         Error.validation(ERROR_CODE_INVALID_PAYLOAD, MESSAGE_INVALID_PAYLOAD, {"id": id, "reason": "$"})
                     )
                 )
+        if self._closed:
+            return Response(fail(self._closed_error(CALLBACK_INVOKE, id)))
         assert self._stub is not None
         request = pb.InvokeRequest(operation=id, payload=payload, metadata=to_metadata(ctx))
         try:
@@ -186,13 +204,17 @@ class Host:
 
         空集合不调用宿主、返回空列表。本地核对（端点、权限、上下文的租户）与 RPC 失败都是整批的结果，每一项同一个错误；
         信封的 ``xihantenant`` 不在本地核对，由宿主逐项判定（invocation.md §5）。宿主返回的结果数与信封数不同时每一项都是
-        ``plugins.process.failed``。
+        ``plugins.process.failed``。客户端已关闭时不发请求，每一项都是 ``plugins.host.unavailable``（ADR-0328）；信封的
+        ``data`` 是字节，没有要编码的一步。
         """
         if not envelopes:
             return []
         refused = self._refuse(ctx, CALLBACK_PUBLISH)
         if refused is not None:
             return [fail(refused) for _ in envelopes]
+        if self._closed:
+            closed = self._closed_error(CALLBACK_PUBLISH, PHASE_PUBLISH)
+            return [fail(closed) for _ in envelopes]
         assert self._stub is not None
         request = pb.PublishRequest(
             envelopes=[to_proto_envelope(envelope) for envelope in envelopes], metadata=to_metadata(ctx)
@@ -217,7 +239,12 @@ class Host:
         return [from_status(status, plugin_id=self._plugin_id, phase=PHASE_PUBLISH) for status in response.results]
 
     async def close(self) -> None:
-        """断开与宿主的连接。"""
+        """断开与宿主的连接；之后的回调不发请求、不重新连接，以 ``plugins.host.unavailable`` 失败（invocation.md §5）。
+
+        可以调用多次。进行中的回调被切断，结果按映射表的 ``Cancelled`` 一行。
+        """
+        # 先记下已关闭再关通道：关闭途中开始的回调看到标记，不会在关掉的通道上发出（grpc.aio 那时抛 UsageError）
+        self._closed = True
         if self._channel is not None:
             await self._channel.close()
 
@@ -286,6 +313,10 @@ class Host:
             return await call
         finally:
             unsubscribe()
+
+    def _closed_error(self, rpc: str, operation: str) -> Error:
+        """客户端已关闭之后的回调：与映射表「``Unavailable``；连接失败」那一行相同（invocation.md §5，ADR-0328）。"""
+        return map_callback_status(rpc, _UNAVAILABLE, REASON_CLIENT_CLOSED, False, self._plugin_id, operation)
 
     def _rpc_failure(self, ctx: Context, rpc: str, error: grpc.aio.AioRpcError, operation: str) -> Error:
         """把一次失败的 RPC 按 invocation.md §5 的表映射为原语层错误；连接失败 grpcio 报的就是 ``Unavailable``。"""

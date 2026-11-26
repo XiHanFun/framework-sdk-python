@@ -1620,6 +1620,73 @@ def test_text_payloads_are_encoded_strictly_after_the_local_checks() -> None:
     run(scenario)
 
 
+def test_callbacks_after_the_client_is_closed_are_unavailable_after_the_encoding() -> None:
+    # invocation.md §5（ADR-0328）：释放回调客户端之后的回调不发请求、不重新连接，结果是 plugins.host.unavailable；它是发出
+    # 这一步本身，排在本地核对与载荷的编码之后。以前关闭之后 grpc.aio 抛出 UsageError，处理器接不住
+    probe = Probe()
+    closed = Outcome(
+        ERROR_CODE_UNAVAILABLE,
+        MESSAGE_HOST_UNAVAILABLE,
+        {"id": PROBE_ID, "reason": "Unavailable: the host client is closed"},
+    )
+    invalid = Outcome(ERROR_CODE_INVALID_PAYLOAD, MESSAGE_INVALID_PAYLOAD, {"id": "orders.create", "reason": "$"})
+
+    async def scenario() -> None:
+        async with fake_host() as (host, endpoint), running(build(probe), env_with_host(endpoint)) as plugin:
+            await plugin.start()
+            await callback(plugin, {"envelopeTenants": [None]})
+            ctx = probe.saved
+            assert ctx is not None
+            client = host_of(ctx)
+            before = (len(host.invocations), len(host.publications))
+            await client.close()
+            await client.close()
+
+            assert outcome((await client.invoke(ctx, "orders.create", b'{"n":1}')).outcome) == closed
+            assert outcome((await client.invoke(ctx, "orders.create", '{"n":1}')).outcome) == closed
+            # 载荷编码不成时是编码的错误，与客户端是否已关闭无关
+            unencodable = '{"title":"' + chr(0xDC00) + '"}'
+            assert outcome((await client.invoke(ctx, "orders.create", unencodable)).outcome) == invalid
+            envelopes = [
+                Envelope(topic="orders.created", id=f"e{index}", source="urn:probe", type="t") for index in (0, 1)
+            ]
+            assert [outcome(result) for result in await client.publish(ctx, envelopes)] == [closed, closed]
+            assert await client.publish(ctx, []) == []
+            # 本地核对仍在前面
+            cancellation = Cancellation()
+            cancellation.cancel()
+            cancelled = await client.invoke(ctx.with_cancellation(cancellation), "orders.create", b"{}")
+            assert outcome(cancelled.outcome).code == ERROR_CODE_CANCELLED
+            denied = await client.publish(ctx.with_baggage(BAGGAGE_TENANT, "t2"), envelopes)
+            assert [outcome(result).key for result in denied] == [MESSAGE_CALLBACK_TENANT_DENIED] * 2
+            assert (len(host.invocations), len(host.publications)) == before, "nothing is sent and nothing dials again"
+
+    run(scenario)
+
+
+def test_closing_the_client_cuts_callbacks_in_flight_as_unavailable() -> None:
+    # invocation.md §5（ADR-0328）：回调途中客户端被释放、切断了进行中的回调，结果同样是「Cancelled，取消信号没有触发」那一行
+    probe = Probe()
+
+    async def scenario() -> None:
+        async with fake_host() as (host, endpoint), running(build(probe), env_with_host(endpoint)) as plugin:
+            await plugin.start()
+            await callback(plugin, {"invoke": False})
+            ctx = probe.saved
+            assert ctx is not None
+            client = host_of(ctx)
+            host.delay = 5.0
+            pending = asyncio.ensure_future(client.invoke(ctx, "orders.create", b"{}"))
+            await asyncio.wait_for(host.invoked.wait(), 5)
+            await client.close()
+            cut = outcome((await asyncio.wait_for(pending, 5)).outcome)
+            assert (cut.code, cut.key) == (ERROR_CODE_UNAVAILABLE, MESSAGE_HOST_UNAVAILABLE), cut
+            assert isinstance(cut.details, dict)
+            assert str(cut.details["reason"]).startswith("Cancelled: "), cut
+
+    run(scenario)
+
+
 @pytest.mark.parametrize(
     ("permissions", "granted", "invoked", "published"),
     [
