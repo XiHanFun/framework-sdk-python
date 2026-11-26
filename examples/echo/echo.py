@@ -5,7 +5,8 @@
 - ``echoes.relay``：经宿主回调（``Host.Invoke``，权限 ``capability:kernel.pipeline``）调用另一个操作，返回宿主的应答；
   回调失败（如宿主没有可用的回调端点时的 ``plugins.host.unavailable``）原样作为结果。
 - ``echoes.crash``：故意让进程异常退出而不应答，宿主应记为崩溃并按退避重启；跑黑盒用例时用 ``--exclude`` 排除。
-- ``events.list``：列出收到的事件 ID（最多保留最近 1000 个）。
+- ``events.list``：列出收到的事件 ID 与作者拿到的信封（ID 与 ``dataschema``，最多保留最近 1000 个）；黑盒运行器以
+  ``--envelopes events.list`` 用它核对 ``data_schema`` 原样交给作者（invocation.md §7）。
 - 订阅 ``echo.events``（竞争消费），健康项 ``echo``。
 
 运行：宿主按清单的 ``entry`` 启动插件目录里的启动脚本，脚本以绝对路径的解释器执行本文件（见文档站 Python SDK 页
@@ -100,19 +101,28 @@ class Empty:
 
 
 @dataclass(frozen=True)
+class ReceivedEnvelope:
+    """作者在一次投递里拿到的信封：ID 与 ``dataschema``，没有时为 ``None``（写成 JSON 的 ``null``）。"""
+
+    id: str
+    data_schema: str | None = field(metadata=operation.json_field("dataSchema"))
+
+
+@dataclass(frozen=True)
 class EventsResponse:
-    """``events.list`` 的响应。"""
+    """``events.list`` 的响应：收到的事件 ID，与同样先后的信封 ID 和 ``dataschema``。"""
 
     ids: list[str]
+    envelopes: list[ReceivedEnvelope]
 
 
 class Echo:
-    """插件的状态：配置的问候语与收到的事件 ID（有界）。"""
+    """插件的状态：配置的问候语与收到的信封（有界）。"""
 
     def __init__(self) -> None:
         """创建空状态。"""
         self.greeting: str | None = None
-        self.events: deque[str] = deque(maxlen=1000)
+        self.events: deque[ReceivedEnvelope] = deque(maxlen=1000)
 
     async def configure(self, configuration: Configuration) -> Result[Unit]:
         """读配置节 ``XiHan:Echo`` 的 ``greeting``；读不出是业务失败，宿主按目录翻译。"""
@@ -162,13 +172,14 @@ class Echo:
         os._exit(3)
 
     async def list_events(self, ctx: Context, request: Empty) -> Result[EventsResponse]:
-        """列出收到的事件 ID。"""
-        return ok(EventsResponse(list(self.events)))
+        """列出收到的事件 ID 与信封。"""
+        envelopes = list(self.events)
+        return ok(EventsResponse([envelope.id for envelope in envelopes], envelopes))
 
     async def handle_event(self, ctx: Context, envelope: Envelope, attempt: int) -> Result[Unit]:
-        """记下投递的事件；按信封 ID 去重，至少一次投递下重复投递也只记一次。"""
-        if envelope.id not in self.events:
-            self.events.append(envelope.id)
+        """记下投递的事件与作者拿到的 ``dataschema``；按信封 ID 去重，至少一次投递下重复投递也只记一次。"""
+        if all(received.id != envelope.id for received in self.events):
+            self.events.append(ReceivedEnvelope(envelope.id, envelope.data_schema))
         return success()
 
 

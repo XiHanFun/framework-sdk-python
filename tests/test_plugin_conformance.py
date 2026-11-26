@@ -30,6 +30,7 @@ CASES = {
     "declared-operations",
     "unavailable",
     "event",
+    "event-envelope",
     "unsubscribed",
     "stream",
     "configuration",
@@ -85,6 +86,9 @@ def test_the_echo_plugin_passes_every_black_box_case(tmp_path: Path) -> None:
         'echoes.create={"text":"hi"}',
         "--exclude",
         "echoes.crash",
+        # event-envelope 经回显信封的操作核对 data_schema 原样交给作者（invocation.md §7，ADR-0327）
+        "--envelopes",
+        "events.list",
     ]
     completed = subprocess.run(
         command,
