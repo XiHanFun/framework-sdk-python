@@ -12,7 +12,7 @@ import pprint
 import re
 import tempfile
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -1035,6 +1035,66 @@ def test_responses_that_are_not_valid_json_text_fail_in_the_plugin() -> None:
             written = await plugin.stub.Invoke(invoke("probes.explode"), metadata=session())
             assert written.status.ok
             assert written.payload == ('{"text":"' + text + '"}').encode("utf-8")
+
+    run(scenario)
+
+
+class Repeated(Mapping[str, Any]):
+    # items() 交出同名的成员：自定义的 to_json_value 可以这样交出 dict 存不下的文本
+    def __init__(self, members: list[tuple[str, Any]]) -> None:
+        self._members = members
+
+    def __getitem__(self, key: str) -> Any:
+        return dict(self._members)[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(name for name, _ in self._members)
+
+    def __len__(self) -> int:
+        return len(self._members)
+
+    def items(self) -> list[tuple[str, Any]]:  # type: ignore[override]
+        return list(self._members)
+
+
+class Twice:
+    def to_json_value(self) -> Any:
+        return Repeated([("a", 1), ("a", 2)])
+
+
+def test_responses_that_do_not_pass_the_json_text_checks_fail_in_the_plugin() -> None:
+    # 写出的整段文本要过共同检查（invocation.md §1「插件一侧写出应答」，ADR-0319）：嵌套超过 64 层或有重复的成员名经
+    # Status.error 报 unhandled_exception，没有参数、不带 inner，payload 为空，不交给宿主去拒绝
+    deep: Any = []
+    for _ in range(63):
+        deep = [deep]
+    responses: dict[str, object] = {
+        # 响应对象是第 1 层，里面 64 层的数组在根之下是 65 层
+        "probes.echo": {"items": deep},
+        "probes.wait": {"twice": Twice()},
+        "probes.callback": [Twice()],
+        # 恰好 64 层照常写出
+        "probes.explode": deep,
+    }
+    registry = operation.Registry()
+    for operation_id, value in responses.items():
+
+        async def respond(ctx: Context, request: Empty, value: object = value) -> Result[object]:
+            return ok(value)
+
+        registry.add(operation.Contract(operation_id), respond, request_type=Empty, response_type=object)
+
+    async def scenario() -> None:
+        async with running(build(Probe(), operations=registry)) as plugin:
+            await plugin.start()
+            for operation_id in ("probes.echo", "probes.wait", "probes.callback"):
+                failed = await plugin.stub.Invoke(invoke(operation_id), metadata=session())
+                assert failed.payload == b"", operation_id
+                expect_failure(failed.status, "KERNEL_UNEXPECTED_001", "kernel.invocation.unhandled_exception", None)
+                assert not failed.status.error.HasField("inner"), operation_id
+            written = await plugin.stub.Invoke(invoke("probes.explode"), metadata=session())
+            assert written.status.ok
+            assert written.payload == b"[" * 64 + b"]" * 64
 
     run(scenario)
 

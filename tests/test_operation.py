@@ -4,7 +4,7 @@ import asyncio
 import json
 import math
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Annotated, Any
@@ -658,6 +658,110 @@ def test_responses_with_surrogate_code_points_cannot_be_written() -> None:
     written = invoke(invoker, Request("labels.text"))
     assert written.outcome.is_ok
     assert written.payload == ('{"label":"' + text + '","tags":["' + chr(0xE9) + '"]}').encode("utf-8")
+
+
+class Repeated(Mapping[str, JsonValue]):
+    # items() 按给定的顺序交出成员，名字可以重复：dict 存不下同名的成员，自定义的 to_json_value 可以这样交出
+    def __init__(self, members: list[tuple[str, JsonValue]]) -> None:
+        self._members = members
+
+    def __getitem__(self, key: str) -> JsonValue:
+        return dict(self._members)[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(name for name, _ in self._members)
+
+    def __len__(self) -> int:
+        return len(self._members)
+
+    def items(self) -> list[tuple[str, JsonValue]]:  # type: ignore[override]
+        return list(self._members)
+
+
+@dataclass(frozen=True)
+class Twice:
+    members: list[tuple[str, JsonValue]]
+
+    def to_json_value(self) -> JsonValue:
+        return Repeated(self.members)
+
+
+@dataclass(frozen=True)
+class Boxed:
+    value: object
+
+
+class Shown(int):
+    def __str__(self) -> str:
+        return f"ORD-{int(self)}"
+
+
+def nested_arrays(depth: int, innermost: object = None) -> object:
+    # depth 层嵌套的数组，最外层是第 1 层；innermost 为空时最里面是空数组
+    value: object = [] if innermost is None else [innermost]
+    for _ in range(depth - 1):
+        value = [value]
+    return value
+
+
+def nested_objects(depth: int) -> object:
+    value: object = {}
+    for _ in range(depth - 1):
+        value = {"a": value}
+    return value
+
+
+def test_responses_that_do_not_pass_the_json_text_checks_cannot_be_written() -> None:
+    # 写出的整段文本要过 RFC-0001「JSON 文本」的共同检查（RFC-0011 规则 10 的「编码」，ADR-0319）：嵌套超过 64 层
+    # （从响应的根算起）或任何一层有重复的成员名同样写不出，以 unhandled_exception 结束，不带 inner，没有载荷
+    unwritable: dict[str, object] = {
+        "depths.arrays": nested_arrays(65),
+        "depths.objects": nested_objects(65),
+        "depths.scalar": nested_arrays(65, 1),
+        # 响应对象本身是第 1 层：里面 64 层的数组在根之下是 65 层
+        "depths.member": Boxed(nested_arrays(64)),
+        "members.repeated": Twice([("a", 1), ("a", 2)]),
+        "members.apart": Twice([("a", 1), ("b", 2), ("a", 3)]),
+        "members.nested": {"outer": [Boxed(Twice([("b", True), ("b", False)]))]},
+        # Python 的 str 里两个代理项码点不是一个字符：映射的键也一样（RFC-0001「写出与转交」，ADR-0319）
+        "members.pair": {chr(0xD83D) + chr(0xDE00): 1},
+        # 共同检查也查语法：int 的子类按自己的 __str__ 写出，写成数字以外的文本同样写不出
+        "numbers.shown": [Shown(1)],
+    }
+    writable: dict[str, tuple[object, bytes]] = {
+        "depths.arrays-at-limit": (nested_arrays(64), b"[" * 64 + b"]" * 64),
+        "depths.scalar-at-limit": (nested_arrays(64, 1), b"[" * 64 + b"1" + b"]" * 64),
+        "depths.objects-at-limit": (nested_objects(64), b'{"a":' * 63 + b"{}" + b"}" * 63),
+        "depths.member-at-limit": (Boxed(nested_arrays(63)), b'{"value":' + b"[" * 63 + b"]" * 63 + b"}"),
+        # 不同层、不同对象里的同名成员不算重复
+        "members.distinct": (
+            Twice([("a", {"a": 1}), ("b", [{"a": 2}, {"a": 3}])]),
+            b'{"a":{"a":1},"b":[{"a":2},{"a":3}]}',
+        ),
+    }
+    registry = Registry()
+    for id, value in unwritable.items():
+        registry.add(Contract(id), returning(value), request_type=Empty, response_type=object)
+    for id, (value, _) in writable.items():
+        registry.add(Contract(id), returning(value), request_type=Empty, response_type=object)
+    invoker = Invoker(registry)
+    for id in unwritable:
+        descriptor = registry.find(id)
+        assert descriptor is not None
+        for response in (invoke(invoker, Request(id)), asyncio.run(descriptor.execute(Context(), b""))):
+            assert response.payload is None, id
+            error = error_of(response)
+            assert (error.code, error.message_key, error.details, error.inner) == (
+                operation.ERROR_CODE_UNEXPECTED,
+                operation.MESSAGE_UNHANDLED_EXCEPTION,
+                None,
+                None,
+            ), id
+    # 恰好 64 层照常写出：最里面有值也一样，差一层都不行
+    for id, (_, payload) in writable.items():
+        written = invoke(invoker, Request(id))
+        assert written.outcome.is_ok, id
+        assert written.payload == payload, id
 
 
 def test_contracts_schemas_and_types_are_checked_when_registering() -> None:
