@@ -4,6 +4,7 @@
 import io
 import json
 import logging
+import math
 import re
 import subprocess
 import sys
@@ -87,6 +88,7 @@ from xihan_framework.primitives import (
     Catalog,
     Error,
     FrameworkError,
+    JsonValue,
     PipelineStage,
     Result,
     Unit,
@@ -522,6 +524,48 @@ def test_error_details_with_lone_surrogates_are_no_details() -> None:
         with pytest.raises(UnicodeEncodeError):
             pb.Error(code="ORDERS_VALIDATION_001", details=text)
     assert _details('{"a":"' + chr(0x1F600) + '"}') == {"a": chr(0x1F600)}
+
+
+def _nested(levels: int) -> dict[str, JsonValue]:
+    """嵌套 ``levels`` 层的对象：1 层是 ``{}``。"""
+    value: dict[str, JsonValue] = {}
+    for _ in range(levels - 1):
+        value = {"a": value}
+    return value
+
+
+def test_error_details_that_cannot_be_written_are_left_out() -> None:
+    # invocation.md §3「写出 Error」（ADR-0320）：细节有代理项码点或写出的文本超过 64 层时这个错误不带细节，其余字段照写；
+    # 内部错误的细节各自核对。Python 的 str 里两个代理项码点也不是一个字符
+    inner = Error.validation("SAMPLES_VALIDATION_002", "samples.inner", {"id": "i1"})
+    unwritable: list[dict[str, JsonValue]] = [
+        {"a": chr(0xD800)},
+        {chr(0xDC00): 1},
+        {"list": ["x", chr(0xDC00) + chr(0xD800)]},
+        {"pair": chr(0xD83D) + chr(0xDE00)},
+        _nested(65),
+    ]
+    for details in unwritable:
+        written = to_proto_error(Error.unexpected("SAMPLES_UNEXPECTED_001", "samples.failed", details, inner))
+        assert written.details == "", ascii(details)
+        assert (written.code, written.message_key) == ("SAMPLES_UNEXPECTED_001", "samples.failed")
+        assert written.inner.details == '{"id":"i1"}', "the inner details are checked on their own"
+        literal = to_proto_error(Error.literal("SAMPLES_CONFLICT_001", "stale", details))
+        assert (literal.details, literal.text) == ("", "stale")
+        outer = to_proto_error(
+            Error.unexpected(
+                "SAMPLES_UNEXPECTED_001",
+                "samples.failed",
+                {"id": "o1"},
+                Error.literal("SAMPLES_VALIDATION_002", "x", details),
+            )
+        )
+        assert (outer.details, outer.inner.details, outer.inner.text) == ('{"id":"o1"}', "", "x")
+    # 64 层的细节照写；平面以外的字符与非有限的数照值模型写
+    deep = to_proto_error(Error.literal("SAMPLES_CONFLICT_001", "stale", _nested(64)))
+    assert deep.details == '{"a":' * 63 + "{}" + "}" * 63
+    special = to_proto_error(Error.literal("SAMPLES_CONFLICT_001", "stale", {"a": chr(0x1F600), "n": math.nan}))
+    assert special.details == '{"a":"' + chr(0x1F600) + '","n":"NaN"}'
 
 
 def test_errors_written_by_the_host_are_read_by_the_same_rules() -> None:

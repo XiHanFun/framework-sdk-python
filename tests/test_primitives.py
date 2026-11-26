@@ -2,7 +2,7 @@
 
 import math
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -675,6 +675,64 @@ def test_json_is_written_by_the_value_model() -> None:
     assert _json.dumps(chr(0xD83D) + chr(0xDE00)) == '"' + chr(0x1F600) + '"'
     assert _json.dumps({"b": [], "a": {}}, indent=True) == '{\n  "b": [],\n  "a": {}\n}'
     assert _json.dumps(ok([_Line("x", 2.0)]).to_json_value()) == '{"ok":true,"value":[{"sku":"x","price":2.0}]}'
+
+
+def _nested(levels: int) -> dict[str, JsonValue]:
+    """嵌套 ``levels`` 层的对象：1 层是 ``{}``。"""
+    value: dict[str, JsonValue] = {}
+    for _ in range(levels - 1):
+        value = {"a": value}
+    return value
+
+
+class _Duplicated(Mapping[str, JsonValue]):
+    """两次交出同一个成员名的映射：写出器照它的 ``items()`` 写，自己不查重复。"""
+
+    def __getitem__(self, key: str) -> JsonValue:
+        """每个成员的值都是 1。"""
+        return 1
+
+    def __iter__(self) -> Iterator[str]:
+        """成员名 ``a`` 出现两次。"""
+        yield "a"
+        yield "a"
+
+    def __len__(self) -> int:
+        """两个成员。"""
+        return 2
+
+
+def test_wire_encodings_that_cannot_be_written_raise() -> None:
+    # RFC-0001「写出与转交」（ADR-0320）：代理项码点、从结果或错误的根算起超过 64 层、重复成员都写不出，不写成转义；
+    # Python 的 str 里两个代理项码点也不是一个字符，同样写不出
+    high, low, pair = chr(0xD800), chr(0xDC00), chr(0xD83D) + chr(0xDE00)
+    unwritable: list[Callable[[], str]] = [
+        lambda: Error.literal("ORDERS_CONFLICT_001", "stale" + high).to_json(),
+        lambda: Error.validation("ORDERS_VALIDATION_001", "orders.invalid", {"id": low}).to_json(),
+        lambda: Error.validation("ORDERS_VALIDATION_001", "orders.invalid", {high + "id": 1}).to_json(),
+        lambda: Error.validation("ORDERS_VALIDATION_001", "orders.invalid", {"note": pair}).to_json(),
+        lambda: Error.unexpected(
+            "ORDERS_UNEXPECTED_001", "orders.failed", None, Error.literal("KERNEL_UNEXPECTED_001", low + high)
+        ).to_json(),
+        lambda: Error.literal("ORDERS_CONFLICT_001", "deep", _nested(64)).to_json(),
+        lambda: ok("x" + low).to_json(),
+        lambda: ok({high: 1}).to_json(),
+        lambda: ok([{"note": "a" + pair}]).to_json(),
+        lambda: fail(Error.literal("ORDERS_CONFLICT_001", "stale" + low)).to_json(),
+        lambda: ok(_nested(64)).to_json(),
+        lambda: fail(Error.literal("ORDERS_CONFLICT_001", "deep", _nested(63))).to_json(),
+        lambda: ok(1).to_json(lambda value: _Duplicated()),
+        lambda: ok(1).to_json(lambda value: {"a": [{"b": _Duplicated()}]}),
+    ]
+    for write in unwritable:
+        with pytest.raises(ValueError, match="cannot be written"):
+            write()
+    # 上限本身照写：结果 1 层、成功值 63 层；错误 1 层、细节 63 层；失败的结果里细节 62 层；平面以外的字符与非有限的数照值模型写
+    assert ok(_nested(63)).to_json() == '{"ok":true,"value":' + '{"a":' * 62 + "{}" + "}" * 62 + "}"
+    Error.literal("ORDERS_CONFLICT_001", "deep", _nested(63)).to_json()
+    fail(Error.literal("ORDERS_CONFLICT_001", "deep", _nested(62))).to_json()
+    assert ok({"note": chr(0x1F600)}).to_json() == '{"ok":true,"value":{"note":"' + chr(0x1F600) + '"}}'
+    assert ok(math.nan).to_json() == '{"ok":true,"value":"NaN"}'
 
 
 def test_strict_json_writing_rejects_surrogate_code_points() -> None:

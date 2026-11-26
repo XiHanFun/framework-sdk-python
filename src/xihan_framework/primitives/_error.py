@@ -199,8 +199,12 @@ class Error:
         return wire
 
     def to_json(self) -> str:
-        """线上编码的紧凑 JSON 文本。"""
-        return dumps(self.to_json_value())
+        """线上编码的紧凑 JSON 文本。
+
+        写出是严格的（RFC-0001「写出与转交」，ADR-0320）：文案、细节或内部错误里的字符串有代理项码点，或从错误的根算起嵌套
+        超过 64 层时写不出，抛出 ``ValueError``。
+        """
+        return dumps(self.to_json_value(), wire=True)
 
     @classmethod
     def from_json_value(cls, value: JsonValue) -> "Error":

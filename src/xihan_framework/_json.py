@@ -10,6 +10,8 @@
 ``-Infinity``，超出 64 位的整数按浮点写出，让对方按同一模型读回同一个值。字符串按 RFC-0010 的 JSON 字符串写法转义。
 响应编码（``strict``）写不成合法 JSON 文本的值即写不出：非有限的浮点与字符串、成员名里的代理项码点抛出 ``ValueError``。
 写出的整段响应文本还要再过 ``parse``（嵌套与重复成员，ADR-0319），由调用者（``operation.Descriptor``）在写完之后核对。
+Result 与 Error 的线上编码与插件协议的错误细节（``wire``，ADR-0320）同样拒收代理项码点，非有限的浮点照值模型写成字符串，
+写完由 ``dumps`` 自己过 ``parse``。
 """
 
 import math
@@ -126,17 +128,33 @@ def member_path(path: str, name: str) -> str:
     return f"{path}.{name}"
 
 
-def dumps(value: JsonValue, *, indent: bool = False, strict: bool = False) -> str:
+def dumps(value: JsonValue, *, indent: bool = False, strict: bool = False, wire: bool = False) -> str:
     """写出 JSON：紧凑形式，或两个空格缩进、LF 换行、``": "`` 分隔、空容器写 ``[]`` / ``{}`` 的缩进形式。
 
     对象成员按给定的顺序；数字与字符串的写法见模块说明，``JsonNumber`` 写回它的原文。``strict`` 用于响应编码
     （RFC-0011 规则 10 的「编码」）：非有限的浮点写不出，抛出 ``ValueError``，不写成字符串或 ``null``；字符串与成员名
     里有代理项码点时同样写不出，不写成 ``\\ud800`` 这样的转义（ADR-0318）。Python 的 ``str`` 以码点存放，代理项码点
     编码不成 UTF-8，成对的两个也不是一个字符（RFC-0001「JSON 文本」，ADR-0301），所以都拒收。
+
+    ``wire`` 用于 Result 与 Error 的线上编码与插件协议的错误细节（RFC-0001「写出与转交」，ADR-0320）：代理项码点同样写不出；
+    非有限的浮点照值模型写成字符串 ``NaN``、``Infinity``、``-Infinity``；写出的整段文本再过共同检查（``parse``），嵌套超过
+    64 层（从 ``value`` 的根算起）或任何一层有重复的成员名时也写不出。写不出都抛出 ``ValueError``，不交出文本。
     """
     parts: list[str] = []
-    _write(value, parts, 0 if indent else None, strict)
-    return "".join(parts)
+    _write(value, parts, 0 if indent else None, strict, strict or wire)
+    text = "".join(parts)
+    if wire:
+        try:
+            parse(text)
+        except JsonTextError as problem:
+            # 代理项在写出时已经拒收，这里只剩嵌套过深（语法错误）与重复成员
+            reason = (
+                f"it nests more than {MAX_DEPTH} levels"
+                if problem.syntax
+                else f"the member {problem.path} appears more than once"
+            )
+            raise ValueError(f"The JSON text cannot be written: {reason}.") from None
+    return text
 
 
 def number_text(value: int | float) -> str:
@@ -219,16 +237,16 @@ def _escape(match: re.Match[str]) -> str:
     return short if short is not None else f"\\u{ord(found):04x}"
 
 
-def _quote(text: str, strict: bool) -> str:
-    """写出字符串或成员名；``strict`` 时有代理项码点即写不出，抛出 ``ValueError``（RFC-0011 规则 10 的「编码」，ADR-0318）。"""
-    if strict and _SURROGATE.search(text) is not None:
+def _quote(text: str, texts: bool) -> str:
+    """写出字符串或成员名；``texts`` 时有代理项码点即写不出，抛出 ``ValueError``（RFC-0011 规则 10 的「编码」，ADR-0318、ADR-0320）。"""
+    if texts and _SURROGATE.search(text) is not None:
         # 不写成转义交给对方：写出的文本要能严格编码成 UTF-8，成对的两个代理项码点也编码不成
         raise ValueError("A string with surrogate code points cannot be written as JSON text.")
     return quote(text)
 
 
-def _write(value: JsonValue, parts: list[str], depth: int | None, strict: bool) -> None:
-    """递归写出一个值；``depth`` 为空表示紧凑形式，``strict`` 时非有限的浮点与代理项码点写不出。"""
+def _write(value: JsonValue, parts: list[str], depth: int | None, strict: bool, texts: bool) -> None:
+    """递归写出一个值；``depth`` 为空表示紧凑形式，``strict`` 时非有限的浮点写不出，``texts`` 时代理项码点写不出。"""
     if value is None:
         parts.append("null")
     elif value is True:
@@ -245,11 +263,11 @@ def _write(value: JsonValue, parts: list[str], depth: int | None, strict: bool) 
     elif isinstance(value, float):
         _write_float(value, parts, strict)
     elif isinstance(value, str):
-        parts.append(_quote(value, strict))
+        parts.append(_quote(value, texts))
     elif isinstance(value, Mapping):
-        _write_members(list(value.items()), parts, depth, strict)
+        _write_members(list(value.items()), parts, depth, strict, texts)
     elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
-        _write_elements(list(value), parts, depth, strict)
+        _write_elements(list(value), parts, depth, strict, texts)
     else:
         raise TypeError(f"The value of type '{type(value).__name__}' is not a JSON value.")
 
@@ -265,7 +283,9 @@ def _write_float(value: float, parts: list[str], strict: bool) -> None:
     parts.append(text if "." in text or "E" in text else text + ".0")
 
 
-def _write_members(members: list[tuple[str, JsonValue]], parts: list[str], depth: int | None, strict: bool) -> None:
+def _write_members(
+    members: list[tuple[str, JsonValue]], parts: list[str], depth: int | None, strict: bool, texts: bool
+) -> None:
     """写出对象成员，顺序按给定的顺序。"""
     if not members:
         parts.append("{}")
@@ -277,14 +297,14 @@ def _write_members(members: list[tuple[str, JsonValue]], parts: list[str], depth
         if index:
             parts.append(",")
         _newline(parts, depth, 1)
-        parts.append(_quote(name, strict))
+        parts.append(_quote(name, texts))
         parts.append(":" if depth is None else ": ")
-        _write(member, parts, None if depth is None else depth + 1, strict)
+        _write(member, parts, None if depth is None else depth + 1, strict, texts)
     _newline(parts, depth, 0)
     parts.append("}")
 
 
-def _write_elements(elements: list[JsonValue], parts: list[str], depth: int | None, strict: bool) -> None:
+def _write_elements(elements: list[JsonValue], parts: list[str], depth: int | None, strict: bool, texts: bool) -> None:
     """写出数组元素。"""
     if not elements:
         parts.append("[]")
@@ -294,7 +314,7 @@ def _write_elements(elements: list[JsonValue], parts: list[str], depth: int | No
         if index:
             parts.append(",")
         _newline(parts, depth, 1)
-        _write(element, parts, None if depth is None else depth + 1, strict)
+        _write(element, parts, None if depth is None else depth + 1, strict, texts)
     _newline(parts, depth, 0)
     parts.append("]")
 

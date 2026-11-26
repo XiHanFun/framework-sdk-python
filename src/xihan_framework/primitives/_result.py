@@ -152,8 +152,13 @@ class Result[T]:
         return {"ok": True, "value": encode_value(self._value)}
 
     def to_json(self, encode_value: Callable[[T], JsonValue] | None = None) -> str:
-        """线上编码的紧凑 JSON 文本。"""
-        return dumps(self.to_json_value(encode_value))
+        """线上编码的紧凑 JSON 文本。
+
+        写出是严格的（RFC-0001「写出与转交」，ADR-0320）：成功值或错误里的字符串（成员名与值）有代理项码点，从结果的根算起
+        嵌套超过 64 层（成功值的最外层是第 2 层），或任何一层有重复的成员名时写不出，抛出 ``ValueError``，对方读不进的文本
+        不交出去。非有限的浮点照值模型写成字符串。
+        """
+        return dumps(self.to_json_value(encode_value), wire=True)
 
     @staticmethod
     def from_json_value[U](value: JsonValue, decode_value: Callable[[JsonValue], U]) -> "Result[U]":

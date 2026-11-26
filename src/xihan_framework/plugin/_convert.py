@@ -1,6 +1,7 @@
 """协议消息与 SDK 类型之间的转换：错误与结果（invocation.md §3）、上下文元数据（invocation.md §2）、信封与健康。"""
 
 import calendar
+import contextlib
 import math
 import re
 from collections.abc import Iterable, Mapping
@@ -46,11 +47,14 @@ def to_proto_error(error: Error) -> pb.Error:
 
     ``code`` 与 ``message_key`` 原样；带消息键的错误 ``text`` 留空，由宿主按目录翻译成调用方的语言（RFC-0010），只有自由
     文本错误（``Error.literal``）写 ``text``；``details`` 按值模型写成 JSON 对象文本，没有时为空；``inner`` 递归写出。
+    细节写不出（字符串里有代理项码点，或写出的文本超过 64 层）时这个错误不带细节，其余字段照写，内部错误的细节各自核对
+    （RFC-0001「写出与转交」，ADR-0320）：写成转义交出去，宿主读到的是另一份细节或当作没有。
     """
     text = "" if error.message_key is not None else error.message
     encoded = pb.Error(code=error.code, message_key=error.message_key or "", text=text)
     if error.details:
-        encoded.details = dumps(encode(dict(error.details)))
+        with contextlib.suppress(ValueError):
+            encoded.details = dumps(encode(dict(error.details)), wire=True)
     if error.inner is not None:
         encoded.inner.CopyFrom(to_proto_error(error.inner))
     return encoded
