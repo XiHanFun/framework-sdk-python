@@ -63,7 +63,6 @@ from xihan_framework.plugin._convert import (
     _details,
     effective_deadline,
     format_deadline,
-    format_time,
     from_proto_envelope,
     from_proto_error,
     from_status,
@@ -267,62 +266,10 @@ def test_sdk_envelope_times_follow_the_vector_at_microsecond_precision(vector: V
         assert _delivered(time=case["text"]) is None, case["name"]
 
 
-#: 六个 SDK 共用的写出用例：作者给的时刻 → SDK 写出的 ``time``（UTC、``Z``、小数去掉末尾的 0）。
-WRITTEN_TIMES: list[tuple[datetime, str]] = [
-    (datetime(2026, 11, 25, 3, 25, 0, 123000, tzinfo=UTC), "2026-11-25T03:25:00.123Z"),
-    (datetime(2026, 11, 25, 3, 25, 0, 500000, tzinfo=UTC), "2026-11-25T03:25:00.5Z"),
-    (datetime(2026, 11, 25, 3, 25, 0, 120000, tzinfo=UTC), "2026-11-25T03:25:00.12Z"),
-    (datetime(2026, 11, 25, 3, 25, tzinfo=UTC), "2026-11-25T03:25:00Z"),
-    (datetime(2026, 11, 25, 11, 25, 0, 250000, tzinfo=timezone(timedelta(hours=8))), "2026-11-25T03:25:00.25Z"),
-    (datetime(2026, 11, 24, 22, 25, tzinfo=timezone(timedelta(hours=-5))), "2026-11-25T03:25:00Z"),
-    (datetime(2026, 1, 1, 0, 30, tzinfo=timezone(timedelta(hours=1))), "2025-12-31T23:30:00Z"),
-    (datetime(1, 1, 1, tzinfo=UTC), "0001-01-01T00:00:00Z"),
-    # 微秒是 datetime 的精度
-    (datetime(2026, 11, 25, 3, 25, 0, 1, tzinfo=UTC), "2026-11-25T03:25:00.000001Z"),
-    (datetime(2026, 11, 25, 3, 25, 0, 123456, tzinfo=UTC), "2026-11-25T03:25:00.123456Z"),
-    (datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=UTC), "9999-12-31T23:59:59.999999Z"),
-]
-
-#: 六个 SDK 共用的读入用例：宿主写来的 ``time`` → 作者收到的 UTC 时刻（比微秒更细的小数截断）。
-READ_TIMES: list[tuple[str, datetime | None]] = [
-    ("2026-11-25T11:25:00+08:00", datetime(2026, 11, 25, 3, 25, tzinfo=UTC)),
-    ("2026-11-24T22:25:00.25-05:00", datetime(2026, 11, 25, 3, 25, 0, 250000, tzinfo=UTC)),
-    ("2026-11-25t03:25:00z", datetime(2026, 11, 25, 3, 25, tzinfo=UTC)),
-    ("2026-11-25T03:25:00.1234567+00:00", datetime(2026, 11, 25, 3, 25, 0, 123456, tzinfo=UTC)),
-    ("2026-11-25T03:25:00.123456789Z", datetime(2026, 11, 25, 3, 25, 0, 123456, tzinfo=UTC)),
-    ("9999-12-31T23:59:59.999999999Z", datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=UTC)),
-    ("", None),
-]
-
-
-@pytest.mark.parametrize(("time", "text"), WRITTEN_TIMES)
-def test_envelope_times_are_written_in_utc_with_the_trailing_zeros_of_the_fraction_dropped(
-    time: datetime, text: str
-) -> None:
-    assert format_time(time) == text
-    assert to_proto_envelope(_envelope(time=time)).time == text
-    # 往返：写出的文本读回同一个时刻
-    assert _delivered_time(text) == time
-
-
-@pytest.mark.parametrize(("text", "time"), READ_TIMES)
-def test_envelope_times_from_the_host_are_read_in_utc_and_truncated_to_microseconds(
-    text: str, time: datetime | None
-) -> None:
-    assert _delivered_time(text) == time
-
-
-def test_envelopes_without_a_time_write_an_empty_text() -> None:
-    assert to_proto_envelope(_envelope()).time == ""
+def test_an_envelope_without_a_time_has_none_and_a_blank_time_is_unreadable() -> None:
+    # 写出与读入的各条用例由上面两个向量回放（ADR-0310）；向量里没有的：不给时间即没有，只有空白不当作没有时间
     assert _envelope().time is None
-
-
-@pytest.mark.parametrize(
-    "text",
-    ["2026-11-25T03:25:60Z", "2026-11-25T03:25:00", "2026-11-25 03:25:00Z", "2026-11-25T03:25:00.1234567890Z", " "],
-)
-def test_envelope_times_from_the_host_outside_the_grammar_are_not_read(text: str) -> None:
-    assert _delivered(time=text) is None
+    assert _delivered(time=" ") is None
 
 
 def test_envelope_times_must_be_timezone_aware_datetimes() -> None:
