@@ -604,6 +604,62 @@ def test_renamed_members_and_unencodable_responses() -> None:
     assert error_of(direct).message_key == operation.MESSAGE_UNHANDLED_EXCEPTION
 
 
+@dataclass(frozen=True)
+class Labelled:
+    label: str
+    tags: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Renamed:
+    count: int = field(metadata=json_field("count" + chr(0xD800)))
+
+
+def returning(value: object) -> operation.Handler[Empty, object]:
+    async def handle(ctx: Context, request: Empty) -> Result[object]:
+        return ok(value)
+
+    return handle
+
+
+def test_responses_with_surrogate_code_points_cannot_be_written() -> None:
+    # 响应里的字符串写不成合法的 JSON 文本即写不出（RFC-0011 规则 10 的「编码」，ADR-0318）：值、成员名、映射的键与数组元素
+    # 里的代理项码点都以 unhandled_exception 结束，不带 inner，没有载荷，不写成 \ud800 这样的转义
+    unwritable: dict[str, object] = {
+        "labels.value": Labelled("a" + chr(0xD800)),
+        "labels.element": Labelled("a", ["b", chr(0xDFFF)]),
+        "labels.member": Renamed(1),
+        "labels.key": {chr(0xD800): 1},
+        "labels.nested-key": {"a": [{"b" + chr(0xDC00): "c"}]},
+        # Python 的 str 里两个代理项码点不是一个字符（RFC-0001「JSON 文本」，ADR-0301）
+        "labels.pair": Labelled(chr(0xD83D) + chr(0xDE00)),
+    }
+    text = "中文" + chr(0x1F600) + chr(0xFFFD)
+    registry = Registry()
+    for id, value in unwritable.items():
+        registry.add(Contract(id), returning(value), request_type=Empty, response_type=object)
+    registry.add(
+        Contract("labels.text"), returning(Labelled(text, [chr(0xE9)])), request_type=Empty, response_type=object
+    )
+    invoker = Invoker(registry)
+    for id in unwritable:
+        descriptor = registry.find(id)
+        assert descriptor is not None
+        for response in (invoke(invoker, Request(id)), asyncio.run(descriptor.execute(Context(), b""))):
+            assert response.payload is None, id
+            error = error_of(response)
+            assert (error.code, error.message_key, error.details, error.inner) == (
+                operation.ERROR_CODE_UNEXPECTED,
+                operation.MESSAGE_UNHANDLED_EXCEPTION,
+                None,
+                None,
+            ), id
+    # 多字节文本与真正的 U+FFFD 照常写出
+    written = invoke(invoker, Request("labels.text"))
+    assert written.outcome.is_ok
+    assert written.payload == ('{"label":"' + text + '","tags":["' + chr(0xE9) + '"]}').encode("utf-8")
+
+
 def test_contracts_schemas_and_types_are_checked_when_registering() -> None:
     with pytest.raises(FrameworkError):
         Schema(request="[]", response="{}")

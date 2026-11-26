@@ -1005,6 +1005,40 @@ def test_empty_payloads_are_empty_objects() -> None:
     run(scenario)
 
 
+def test_responses_that_are_not_valid_json_text_fail_in_the_plugin() -> None:
+    # 类型化的应答写不成合法的 JSON 文本即写不出（invocation.md §1「插件一侧写出应答」，ADR-0318）：值、映射的键与数组元素
+    # 里的代理项码点经 Status.error 报 unhandled_exception，没有参数、不带 inner，payload 为空，不写成转义交给宿主
+    text = "中文" + chr(0x1F600) + chr(0xFFFD)
+    responses: dict[str, object] = {
+        "probes.echo": {"text": "a" + chr(0xD800)},
+        "probes.wait": {chr(0xDC00): "b"},
+        "probes.callback": {"items": ["c", chr(0xD83D) + chr(0xDE00)]},
+        "probes.explode": {"text": text},
+    }
+    registry = operation.Registry()
+    for operation_id, value in responses.items():
+
+        async def respond(ctx: Context, request: Empty, value: object = value) -> Result[object]:
+            return ok(value)
+
+        registry.add(operation.Contract(operation_id), respond, request_type=Empty, response_type=object)
+
+    async def scenario() -> None:
+        async with running(build(Probe(), operations=registry)) as plugin:
+            await plugin.start()
+            for operation_id in ("probes.echo", "probes.wait", "probes.callback"):
+                failed = await plugin.stub.Invoke(invoke(operation_id), metadata=session())
+                assert failed.payload == b"", operation_id
+                expect_failure(failed.status, "KERNEL_UNEXPECTED_001", "kernel.invocation.unhandled_exception", None)
+                assert not failed.status.error.HasField("inner"), operation_id
+            # 多字节文本与真正的 U+FFFD 照常写出
+            written = await plugin.stub.Invoke(invoke("probes.explode"), metadata=session())
+            assert written.status.ok
+            assert written.payload == ('{"text":"' + text + '"}').encode("utf-8")
+
+    run(scenario)
+
+
 def test_cancelling_a_call_only_signals_the_handler() -> None:
     probe = Probe()
 

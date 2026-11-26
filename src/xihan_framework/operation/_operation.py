@@ -280,7 +280,11 @@ class Descriptor:
             return None, self._invalid_payload(error.path)
 
     def _encode_response(self, value: object) -> Response:
-        """把成功的响应对象编码成载荷；写不出（非有限的浮点、编码不了的值）时以 ``unhandled_exception`` 结束，不抛出。"""
+        """把成功的响应对象编码成载荷；写不出（非有限的浮点、编码不了的值）时以 ``unhandled_exception`` 结束，不抛出。
+
+        写不成合法的 JSON 文本同样是写不出：字符串（值、成员名与映射的键）里有代理项码点时不写成转义，错误不带 ``inner``
+        （RFC-0011 规则 10 的「编码」，ADR-0318）；只有 ``FrameworkError`` 的错误才放进 ``inner``。
+        """
         try:
             payload = dumps(encode(value), strict=True).encode("utf-8")
         except Exception as exception:
@@ -502,7 +506,7 @@ class Invoker:
         """执行一个 XGI 请求：未登记返回 ``KERNEL_NOTFOUND_001``（不进管道）；否则经完整管道执行，结束之后编码响应。
 
         管道成功结束而没有执行操作（中间件短路成功）时返回 ``KERNEL_UNEXPECTED_001`` + ``kernel.operation.no_response``；
-        响应写不出（类型化的浮点是 NaN 或无穷、编码不了的值）时返回 ``KERNEL_UNEXPECTED_001`` +
+        响应写不出（类型化的浮点是 NaN 或无穷、字符串里有代理项码点、编码不了的值）时返回 ``KERNEL_UNEXPECTED_001`` +
         ``kernel.invocation.unhandled_exception``，框架异常的错误放进 ``inner``，不抛给调用方，没有载荷。
         """
         descriptor = self._registry.find(request.id)

@@ -8,6 +8,7 @@
 数字按值模型（RFC-0010「模板」）：整数写法且在 64 位有符号范围内的是 ``int``，其余是 ``float``（上溢为无穷，下溢为 0）；
 ``-0`` 是整数 0，``-0.0`` 是负零。写出时整数值的浮点带 ``.0``，非有限的浮点写成字符串 ``NaN``、``Infinity``、
 ``-Infinity``，超出 64 位的整数按浮点写出，让对方按同一模型读回同一个值。字符串按 RFC-0010 的 JSON 字符串写法转义。
+响应编码（``strict``）写不成合法 JSON 文本的值即写不出：非有限的浮点与字符串、成员名里的代理项码点抛出 ``ValueError``。
 """
 
 import math
@@ -128,7 +129,9 @@ def dumps(value: JsonValue, *, indent: bool = False, strict: bool = False) -> st
     """写出 JSON：紧凑形式，或两个空格缩进、LF 换行、``": "`` 分隔、空容器写 ``[]`` / ``{}`` 的缩进形式。
 
     对象成员按给定的顺序；数字与字符串的写法见模块说明，``JsonNumber`` 写回它的原文。``strict`` 用于响应编码
-    （RFC-0011 规则 10 的「编码」）：非有限的浮点写不出，抛出 ``ValueError``，不写成字符串或 ``null``。
+    （RFC-0011 规则 10 的「编码」）：非有限的浮点写不出，抛出 ``ValueError``，不写成字符串或 ``null``；字符串与成员名
+    里有代理项码点时同样写不出，不写成 ``\\ud800`` 这样的转义（ADR-0318）。Python 的 ``str`` 以码点存放，代理项码点
+    编码不成 UTF-8，成对的两个也不是一个字符（RFC-0001「JSON 文本」，ADR-0301），所以都拒收。
     """
     parts: list[str] = []
     _write(value, parts, 0 if indent else None, strict)
@@ -215,8 +218,16 @@ def _escape(match: re.Match[str]) -> str:
     return short if short is not None else f"\\u{ord(found):04x}"
 
 
+def _quote(text: str, strict: bool) -> str:
+    """写出字符串或成员名；``strict`` 时有代理项码点即写不出，抛出 ``ValueError``（RFC-0011 规则 10 的「编码」，ADR-0318）。"""
+    if strict and _SURROGATE.search(text) is not None:
+        # 不写成转义交给对方：写出的文本要能严格编码成 UTF-8，成对的两个代理项码点也编码不成
+        raise ValueError("A string with surrogate code points cannot be written as JSON text.")
+    return quote(text)
+
+
 def _write(value: JsonValue, parts: list[str], depth: int | None, strict: bool) -> None:
-    """递归写出一个值；``depth`` 为空表示紧凑形式，``strict`` 时非有限的浮点写不出。"""
+    """递归写出一个值；``depth`` 为空表示紧凑形式，``strict`` 时非有限的浮点与代理项码点写不出。"""
     if value is None:
         parts.append("null")
     elif value is True:
@@ -233,7 +244,7 @@ def _write(value: JsonValue, parts: list[str], depth: int | None, strict: bool) 
     elif isinstance(value, float):
         _write_float(value, parts, strict)
     elif isinstance(value, str):
-        parts.append(quote(value))
+        parts.append(_quote(value, strict))
     elif isinstance(value, Mapping):
         _write_members(list(value.items()), parts, depth, strict)
     elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
@@ -265,7 +276,7 @@ def _write_members(members: list[tuple[str, JsonValue]], parts: list[str], depth
         if index:
             parts.append(",")
         _newline(parts, depth, 1)
-        parts.append(quote(name))
+        parts.append(_quote(name, strict))
         parts.append(":" if depth is None else ": ")
         _write(member, parts, None if depth is None else depth + 1, strict)
     _newline(parts, depth, 0)

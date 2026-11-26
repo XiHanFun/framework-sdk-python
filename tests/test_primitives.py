@@ -677,6 +677,20 @@ def test_json_is_written_by_the_value_model() -> None:
     assert _json.dumps(ok([_Line("x", 2.0)]).to_json_value()) == '{"ok":true,"value":[{"sku":"x","price":2.0}]}'
 
 
+def test_strict_json_writing_rejects_surrogate_code_points() -> None:
+    # 响应编码写不成合法的 JSON 文本即写不出（RFC-0011 规则 10 的「编码」，ADR-0318）：值、成员名与数组元素里的代理项码点
+    # 都拒收，不写成转义；Python 的 str 里两个代理项码点也不是一个字符，同样拒收
+    for surrogates in (chr(0xD800), chr(0xDFFF), "a" + chr(0xDC00), chr(0xD83D) + chr(0xDE00)):
+        values: list[_json.JsonValue] = [surrogates, {surrogates: 1}, {"a": {"b": [1, surrogates]}}, [surrogates]]
+        for value in values:
+            with pytest.raises(ValueError, match="surrogate code points"):
+                _json.dumps(value, strict=True)
+    # 多字节文本与真正的 U+FFFD 照常写出，与不带 strict 的相同
+    text = "中文" + chr(0x1F600) + chr(0xFFFD) + chr(0xE9)
+    assert _json.dumps(text, strict=True) == _json.dumps(text)
+    assert _json.dumps({text: [text]}, strict=True) == '{"' + text + '":["' + text + '"]}'
+
+
 def test_json_text_follows_the_vector(vector: VectorLoader) -> None:
     # 共同的 JSON 读取检查（RFC-0001「JSON 文本」，ADR-0236）：语法错误只写 $，重复成员写第一处重复的路径
     for case in vector("primitives", "json-text")["cases"]:
