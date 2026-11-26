@@ -42,6 +42,7 @@ from xihan_framework.invocation import (
     Cancellation,
     Context,
 )
+from xihan_framework.operation import ERROR_CODE_INVALID_PAYLOAD, MESSAGE_INVALID_PAYLOAD
 from xihan_framework.plugin import (
     ENV_HOST_ADDRESS,
     ERROR_CODE_CALLBACK_DENIED,
@@ -1582,6 +1583,39 @@ def test_callbacks_carry_only_the_tenant_of_an_in_flight_call() -> None:
             assert late.outcome.error is not None
             assert late.outcome.error.message_key == MESSAGE_CALLBACK_TENANT_DENIED
             assert host.invocations == []
+
+    run(scenario)
+
+
+def test_text_payloads_are_encoded_strictly_after_the_local_checks() -> None:
+    # invocation.md §5（ADR-0312）：以 str 给出的载荷发出之前严格编码成 UTF-8；Python 的 str 里的代理项码点（成对的两个也一样）
+    # 编码不成，不发请求，与宿主读到不是 JSON 的载荷相同；排在端点、权限、租户、截止时间与取消的核对之后
+    probe = Probe()
+    invalid = Outcome(ERROR_CODE_INVALID_PAYLOAD, MESSAGE_INVALID_PAYLOAD, {"id": "orders.create", "reason": "$"})
+
+    async def scenario() -> None:
+        async with fake_host() as (host, endpoint), running(build(probe), env_with_host(endpoint)) as plugin:
+            await plugin.start()
+            await callback(plugin, {"invoke": False})
+            ctx = probe.saved
+            assert ctx is not None
+            client = host_of(ctx)
+            text = '{"title":"' + chr(0x1F600) + "中" + '"}'
+            assert (await client.invoke(ctx, "orders.create", text)).outcome.is_ok
+            assert host.invocations[-1].request.payload == text.encode("utf-8")
+            for surrogates in (chr(0xD800), chr(0xDC00), chr(0xDC00) + chr(0xD800), chr(0xD83D) + chr(0xDE00)):
+                response = await client.invoke(ctx, "orders.create", '{"title":"' + surrogates + '"}')
+                assert outcome(response.outcome) == invalid, ascii(surrogates)
+                assert response.payload is None
+            # 先后：租户与取消先失败的仍报它们
+            unencodable = '{"title":"' + chr(0xD800) + '"}'
+            denied = await client.invoke(ctx.with_baggage(BAGGAGE_TENANT, "t2"), "orders.create", unencodable)
+            assert outcome(denied.outcome).key == MESSAGE_CALLBACK_TENANT_DENIED
+            cancellation = Cancellation()
+            cancellation.cancel()
+            cancelled = await client.invoke(ctx.with_cancellation(cancellation), "orders.create", unencodable)
+            assert outcome(cancelled.outcome).code == ERROR_CODE_CANCELLED
+            assert len(host.invocations) == 1, "only the encodable payload reaches the host"
 
     run(scenario)
 

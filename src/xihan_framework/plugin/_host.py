@@ -141,8 +141,13 @@ class Host:
         """选中的回调端点；没有可用端点时为 ``None``。"""
         return self._endpoint
 
-    async def invoke(self, ctx: Context, id: str, payload: bytes = b"") -> Response:
+    async def invoke(self, ctx: Context, id: str, payload: bytes | str = b"") -> Response:
         """以插件身份经宿主的完整管道调用一个操作（需要权限 ``capability:kernel.pipeline``）。
+
+        ``payload`` 是请求的 JSON 文本，空等价于 ``{}``。``bytes`` 原样发出，由宿主核对；``str`` 在发出之前严格编码成 UTF-8
+        （invocation.md §5，ADR-0312）：Python 的 ``str`` 以码点存放，里面的代理项码点（成对的两个也一样）编码不成，即不发
+        请求，结果为 ``KERNEL_VALIDATION_001`` + ``kernel.operation.invalid_payload``（``id`` 为操作 ID，``reason`` 为 ``$``），
+        与宿主读到不是 JSON 的载荷相同；这一项排在端点、权限、租户、截止时间与取消的核对之后。
 
         元数据取自 ``ctx``：当前 Span 的 traceparent、截止时间与已登记的 Baggage（``to_metadata``），截止时间同时是 gRPC
         调用的截止时间；``ctx`` 的取消信号触发时取消这次 gRPC 调用。gRPC 失败按 invocation.md §5 的表映射为原语层错误，
@@ -151,6 +156,16 @@ class Host:
         refused = self._refuse(ctx, CALLBACK_INVOKE)
         if refused is not None:
             return Response(fail(refused))
+        if isinstance(payload, str):
+            # 宿主在管道的 Validate 阶段才解码载荷：权限、租户与截止时间的错误先于它，所以排在本地核对之后
+            try:
+                payload = payload.encode("utf-8")
+            except UnicodeEncodeError:
+                return Response(
+                    fail(
+                        Error.validation(ERROR_CODE_INVALID_PAYLOAD, MESSAGE_INVALID_PAYLOAD, {"id": id, "reason": "$"})
+                    )
+                )
         assert self._stub is not None
         request = pb.InvokeRequest(operation=id, payload=payload, metadata=to_metadata(ctx))
         try:
