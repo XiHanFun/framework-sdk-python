@@ -60,6 +60,7 @@ from xihan_framework.plugin import (
 )
 from xihan_framework.plugin._convert import (
     REASON_FAILURE_WITHOUT_ERROR,
+    REASON_UNENCODABLE_BAGGAGE,
     _details,
     effective_deadline,
     format_deadline,
@@ -365,6 +366,7 @@ def test_plugin_messages_follow_the_vector(vector: VectorLoader) -> None:
     assert (MESSAGE_FAILED, REASON_CONFIGURATION_NOT_OBJECT) in reasons
     assert (MESSAGE_FAILED, REASON_FAILURE_WITHOUT_ERROR) in reasons
     assert (MESSAGE_HOST_UNAVAILABLE, REASON_NO_CALLBACK_ENDPOINT) in reasons
+    assert (MESSAGE_FAILED, REASON_UNENCODABLE_BAGGAGE) in reasons
     for templated in ("invalid error code '{code}'", "the host returned {results} results for {envelopes} envelopes"):
         assert (MESSAGE_FAILED, templated) in reasons
 

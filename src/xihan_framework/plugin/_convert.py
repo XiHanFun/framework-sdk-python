@@ -31,6 +31,8 @@ from xihan_framework.primitives import (
 PHASE_INVOKE: Final = "invoke"
 #: 宿主报了失败却没有错误时的 ``reason``（invocation.md §3）。
 REASON_FAILURE_WITHOUT_ERROR: Final = "the host reported a failure without an error"
+#: 要写进回调元数据的 Baggage 值编不成 UTF-8 时 ``reason`` 的模板（invocation.md §5，ADR-0347）：``{key}`` 换成键名，不带值。
+REASON_UNENCODABLE_BAGGAGE: Final = "baggage '{key}' has a lone surrogate and cannot be encoded as UTF-8"
 
 # 时间文本的读法（RFC-0003 规则 8，截止时间与信封的 time 共用）：日期与时间的各段只认 ASCII 数字，小数 1–9 位，偏移是 Z 或
 # ±HH:MM；各段的取值范围在匹配之后另行核对。[0-9] 是字面的码点范围，全角数字不会匹配
@@ -217,9 +219,21 @@ def restore_context(
     )
 
 
+def unencodable_baggage(ctx: Context) -> str | None:
+    """``to_metadata`` 要写进 ``baggage`` 的值（已登记的键）里第一个编不成 UTF-8 的键；都编得成时为 ``None``。
+
+    Python 的 ``str`` 里任何代理项码点都算，成对出现的两个也一样（invocation.md §5，ADR-0347）：upb 编码这样的值时抛
+    ``UnicodeEncodeError``。只看代理项码点，不按 Baggage 值的完整约束判定：幂等键不受长度与控制字符的约束，完整判定会误拒。
+    """
+    for key, value in ctx.without_unregistered_baggage().baggage.items():
+        if _SURROGATE.search(value) is not None:
+            return key
+    return None
+
+
 def to_metadata(ctx: Context) -> pb.InvocationMetadata:
     """把回调所在的调用上下文编码为元数据（invocation.md §5）：当前 Span 的 ``traceparent``、按 §2 写法的截止时间与已登记的
-    Baggage，``trace_state`` 为空。"""
+    Baggage，``trace_state`` 为空；值编不成 UTF-8 的先由 ``unencodable_baggage`` 挡下，否则 upb 抛 ``UnicodeEncodeError``。"""
     metadata = pb.InvocationMetadata(trace_parent=ctx.trace_parent)
     if ctx.deadline is not None:
         metadata.deadline = format_deadline(ctx.deadline)

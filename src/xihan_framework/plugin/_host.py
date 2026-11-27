@@ -18,7 +18,14 @@ from xihan_framework.operation import (
     MESSAGE_NOT_FOUND,
     Response,
 )
-from xihan_framework.plugin._convert import failed, from_status, to_metadata, to_proto_envelope
+from xihan_framework.plugin._convert import (
+    REASON_UNENCODABLE_BAGGAGE,
+    failed,
+    from_status,
+    to_metadata,
+    to_proto_envelope,
+    unencodable_baggage,
+)
 from xihan_framework.plugin._lifecycle import TenantLedger
 from xihan_framework.plugin._messages import (
     ERROR_CODE_CALLBACK_DENIED,
@@ -111,7 +118,9 @@ class Host:
     请求，每次回调都以 ``PLUGINS_UNAVAILABLE_001`` + ``plugins.host.unavailable`` 失败。发出之前按宿主的顺序在本地核对，
     与宿主给出同样的错误：所需权限既在清单 ``permissions`` 里、也在 ``Configure`` 授予的权限里，否则
     ``plugins.callback.denied``；上下文的租户必须是插件此刻正在处理的某个调用或投递的租户，否则
-    ``plugins.callback.tenant_denied``。每次调用都在元数据 ``xihan-plugin-session`` 里带会话令牌，宿主以插件身份执行。
+    ``plugins.callback.tenant_denied``；截止时间已过或已被取消的也不发出；要写进 ``metadata.baggage`` 的值有代理项码点时
+    以 ``plugins.process.failed`` 失败、不发出（ADR-0347）。每次调用都在元数据 ``xihan-plugin-session`` 里带会话令牌，宿主以
+    插件身份执行。
     运行时收尾时关闭客户端（``close``），之后的回调不发请求、不重新连接，结果是 ``plugins.host.unavailable``。
     """
 
@@ -162,7 +171,12 @@ class Host:
         ``payload`` 是请求的 JSON 文本，空等价于 ``{}``。``bytes`` 原样发出，由宿主核对；``str`` 在发出之前严格编码成 UTF-8
         （invocation.md §5，ADR-0312）：Python 的 ``str`` 以码点存放，里面的代理项码点（成对的两个也一样）编码不成，即不发
         请求，结果为 ``KERNEL_VALIDATION_001`` + ``kernel.operation.invalid_payload``（``id`` 为操作 ID，``reason`` 为 ``$``），
-        与宿主读到不是 JSON 的载荷相同；这一项排在端点、权限、租户、截止时间与取消的核对之后。
+        与宿主读到不是 JSON 的载荷相同；这一项排在端点、权限、租户、截止时间与取消以及元数据的核对之后。
+
+        要写进 ``metadata.baggage`` 的值（已登记的键；实际上只有幂等键可能带这样的值）有代理项码点（成对的两个也一样）时同样
+        不发请求，结果为 ``PLUGINS_UNEXPECTED_001`` + ``plugins.process.failed``（``phase`` 为操作 ID，``reason`` 为
+        ``baggage '<键>' has a lone surrogate and cannot be encoded as UTF-8``），排在截止时间与取消之后、载荷之前
+        （invocation.md §5，ADR-0347）。
 
         元数据取自 ``ctx``：当前 Span 的 traceparent、截止时间与已登记的 Baggage（``to_metadata``），截止时间同时是 gRPC
         调用的截止时间；``ctx`` 的取消信号触发时取消这次 gRPC 调用。gRPC 失败按 invocation.md §5 的表映射为原语层错误，
@@ -172,6 +186,9 @@ class Host:
         refused = self._refuse(ctx, CALLBACK_INVOKE)
         if refused is not None:
             return Response(fail(refused))
+        unencodable = self._unencodable_metadata(ctx, CALLBACK_INVOKE, id)
+        if unencodable is not None:
+            return Response(fail(unencodable))
         if isinstance(payload, str):
             # 宿主在管道的 Validate 阶段才解码载荷：权限、租户与截止时间的错误先于它，所以排在本地核对之后
             try:
@@ -204,14 +221,19 @@ class Host:
 
         空集合不调用宿主、返回空列表。本地核对（端点、权限、上下文的租户）与 RPC 失败都是整批的结果，每一项同一个错误；
         信封的 ``xihantenant`` 不在本地核对，由宿主逐项判定（invocation.md §5）。宿主返回的结果数与信封数不同时每一项都是
-        ``plugins.process.failed``。客户端已关闭时不发请求，每一项都是 ``plugins.host.unavailable``（ADR-0328）；信封的
-        ``data`` 是字节，没有要编码的一步。
+        ``plugins.process.failed``。要写进 ``metadata.baggage`` 的值有代理项码点时同样是整批的结果，每一项都是
+        ``plugins.process.failed``（``phase`` 为 ``publish``，ADR-0347，见 ``invoke``）。客户端已关闭时不发请求，每一项都是
+        ``plugins.host.unavailable``（ADR-0328）；信封的 ``data`` 是字节，没有要编码的一步。
         """
         if not envelopes:
             return []
         refused = self._refuse(ctx, CALLBACK_PUBLISH)
         if refused is not None:
             return [fail(refused) for _ in envelopes]
+        # 元数据是整个请求共用的：写不出时每一项都是这个错误
+        unencodable = self._unencodable_metadata(ctx, CALLBACK_PUBLISH, PHASE_PUBLISH)
+        if unencodable is not None:
+            return [fail(unencodable) for _ in envelopes]
         if self._closed:
             closed = self._closed_error(CALLBACK_PUBLISH, PHASE_PUBLISH)
             return [fail(closed) for _ in envelopes]
@@ -285,6 +307,18 @@ class Host:
                 rpc, _CANCELLED, _LOCALLY_CANCELLED, True, self._plugin_id, callback_phase(rpc, "")
             )
         return None
+
+    def _unencodable_metadata(self, ctx: Context, rpc: str, operation: str) -> Error | None:
+        """回调元数据的核对（invocation.md §5，ADR-0347）：要写进 ``metadata.baggage`` 的值有代理项码点即不发请求，结果是
+        ``plugins.process.failed``，与宿主写给插件的元数据同一条规则、同一个错误；全部编得成 UTF-8 时为 ``None``。
+
+        排在本地核对（端点、权限、租户、截止时间与取消）之后：它们是宿主会给出的错误，写不出请求是本地才有的。几个键都是
+        这样时点名先遇到的一个。
+        """
+        key = unencodable_baggage(ctx)
+        if key is None:
+            return None
+        return failed(self._plugin_id, callback_phase(rpc, operation), REASON_UNENCODABLE_BAGGAGE.replace("{key}", key))
 
     async def _call[Req, Res](
         self, ctx: Context, method: grpc.aio.UnaryUnaryMultiCallable[Req, Res], request: Req

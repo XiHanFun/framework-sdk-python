@@ -76,6 +76,7 @@ from xihan_framework.plugin import (
 )
 from xihan_framework.plugin.v1 import plugin_pb2 as pb
 from xihan_framework.primitives import (
+    BAGGAGE_IDEMPOTENCY_KEY,
     BAGGAGE_TENANT,
     Catalog,
     Error,
@@ -1660,6 +1661,71 @@ def test_callbacks_after_the_client_is_closed_are_unavailable_after_the_encoding
             denied = await client.publish(ctx.with_baggage(BAGGAGE_TENANT, "t2"), envelopes)
             assert [outcome(result).key for result in denied] == [MESSAGE_CALLBACK_TENANT_DENIED] * 2
             assert (len(host.invocations), len(host.publications)) == before, "nothing is sent and nothing dials again"
+
+    run(scenario)
+
+
+def test_baggage_values_with_surrogates_send_no_callback() -> None:
+    # invocation.md §5（ADR-0347）：要写进回调 metadata.baggage 的值有代理项码点即不发请求（只有幂等键可能带这样的值），Python 的
+    # str 里任何代理项码点都算，成对出现的两个也一样；结果是 PLUGINS_UNEXPECTED_001 + plugins.process.failed，phase 与回调的其他
+    # 失败相同，reason 只点名键、不带值。以前 upb 编码元数据时抛 UnicodeEncodeError，漏出回调
+    probe = Probe()
+    reason = "baggage 'xihan.idempotency-key' has a lone surrogate and cannot be encoded as UTF-8"
+    invoked = Outcome(
+        ERROR_CODE_UNEXPECTED, MESSAGE_FAILED, {"id": PROBE_ID, "phase": "orders.create", "reason": reason}
+    )
+    published = Outcome(ERROR_CODE_UNEXPECTED, MESSAGE_FAILED, {"id": PROBE_ID, "phase": "publish", "reason": reason})
+
+    async def scenario() -> None:
+        async with fake_host() as (host, endpoint), running(build(probe), env_with_host(endpoint)) as plugin:
+            await plugin.start()
+            await callback(plugin, {"invoke": False})
+            ctx = probe.saved
+            assert ctx is not None
+            client = host_of(ctx)
+            before = (len(host.invocations), len(host.publications))
+            envelopes = [
+                Envelope(topic="orders.created", id=f"e{index}", source="urn:probe", type="t") for index in (0, 1)
+            ]
+            for key in (
+                "k" + chr(0xD800),
+                chr(0xDC00) + "k",
+                chr(0xDC00) + chr(0xD800),
+                "k" + chr(0xD83D) + chr(0xDE00),
+            ):
+                scoped = ctx.with_baggage(BAGGAGE_IDEMPOTENCY_KEY, key)
+                assert outcome((await client.invoke(scoped, "orders.create", b"{}")).outcome) == invoked, ascii(key)
+                assert [outcome(result) for result in await client.publish(scoped, envelopes)] == [published] * 2
+            assert (len(host.invocations), len(host.publications)) == before, "no request reaches the host"
+
+            # 平面以外的字符是一个码点：照常发出，宿主收到的就是这个幂等键
+            emoji = ctx.with_baggage(BAGGAGE_IDEMPOTENCY_KEY, "k" + chr(0x1F600))
+            assert (await client.invoke(emoji, "orders.create", b"{}")).outcome.is_ok
+            assert all(result.is_ok for result in await client.publish(emoji, envelopes))
+            sent = [host.invocations[-1].request.metadata, host.publications[-1].request.metadata]
+            assert [metadata.baggage[BAGGAGE_IDEMPOTENCY_KEY] for metadata in sent] == ["k" + chr(0x1F600)] * 2
+
+            # 先后：租户、截止时间与取消先失败的仍报它们；元数据先于载荷的编码
+            bad = ctx.with_baggage(BAGGAGE_IDEMPOTENCY_KEY, "k" + chr(0xD800))
+            denied = await client.publish(bad.with_baggage(BAGGAGE_TENANT, "t2"), envelopes)
+            assert [outcome(result).key for result in denied] == [MESSAGE_CALLBACK_TENANT_DENIED] * 2
+            past = datetime.now(UTC) - timedelta(seconds=1)
+            expired = Context(deadline=past, baggage={BAGGAGE_IDEMPOTENCY_KEY: "k" + chr(0xD800)})
+            assert outcome((await client.invoke(expired, "orders.create", b"{}")).outcome).code == (
+                ERROR_CODE_DEADLINE_EXCEEDED
+            )
+            cancellation = Cancellation()
+            cancellation.cancel()
+            cancelled = await client.publish(bad.with_cancellation(cancellation), envelopes)
+            assert [outcome(result).code for result in cancelled] == [ERROR_CODE_CANCELLED] * 2
+            unencodable = '{"title":"' + chr(0xDC00) + '"}'
+            assert outcome((await client.invoke(bad, "orders.create", unencodable)).outcome) == invoked
+
+            # 已关闭的客户端：元数据的核对在发出这一步之前
+            await client.close()
+            assert outcome((await client.invoke(bad, "orders.create", b"{}")).outcome) == invoked
+            assert [outcome(result) for result in await client.publish(bad, envelopes)] == [published] * 2
+            assert (len(host.invocations), len(host.publications)) == (before[0] + 1, before[1] + 1)
 
     run(scenario)
 
