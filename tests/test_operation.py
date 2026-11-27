@@ -778,6 +778,32 @@ def test_contracts_schemas_and_types_are_checked_when_registering() -> None:
         Registry().add(Contract("sets.create"), handle, request_type=set, response_type=Empty)
 
 
+@dataclass(frozen=True)
+class Clashing:
+    first: int = field(default=0, metadata=json_field("value"))
+    second: int = field(default=0, metadata=json_field("value"))
+
+
+@dataclass(frozen=True)
+class ClashingPage:
+    items: list[Clashing]
+
+
+def test_two_fields_with_the_same_json_name_fail_when_registering_the_request_or_the_response() -> None:
+    # ADR-0319、ADR-0340：请求与响应类型（含嵌套的）里的 dataclass 有两个字段写成同一个 JSON 名时注册即抛出 TypeError，
+    # 作响应类型也不等到调用时才以 KERNEL_UNEXPECTED_001 结束；.NET 取源生成的序列化元数据时同样即抛出
+    async def handle(ctx: Context, request: Any) -> Result[Any]:
+        return ok(Empty())
+
+    registry = Registry()
+    for request_type, response_type in ((Clashing, Empty), (Empty, Clashing), (Empty, ClashingPage)):
+        with pytest.raises(TypeError, match="same JSON name 'value'"):
+            registry.add(Contract("clashes.read"), handle, request_type=request_type, response_type=response_type)
+    assert len(registry) == 0, "nothing is registered"
+    registry.add(Contract("clashes.read"), handle, request_type=Empty, response_type=OrderCreated)
+    assert len(registry) == 1
+
+
 def test_contracts_expose_only_the_five_protocols() -> None:
     # RFC-0011：Expose.All 冻结为五个协议；值是插件协议 OperationDeclaration.expose 里的小写名字
     assert [(protocol.name, protocol.value) for protocol in Expose] == [

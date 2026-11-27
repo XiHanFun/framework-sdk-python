@@ -7,7 +7,15 @@ from typing import Annotated, Any, Literal
 import pytest
 
 from xihan_framework import _json
-from xihan_framework._codec import DecodeError, Int32, IntRange, compile_decoder, encode, json_field
+from xihan_framework._codec import (
+    DecodeError,
+    Int32,
+    IntRange,
+    check_json_names,
+    compile_decoder,
+    encode,
+    json_field,
+)
 from xihan_framework._json import JsonNumber
 from xihan_framework.primitives import (
     Error,
@@ -85,6 +93,21 @@ class Cased:
     value: int
     other: int = field(default=0, metadata=json_field("Value"))
     _value: int = field(default=0, metadata=json_field("value"))
+
+
+@dataclass(frozen=True)
+class Holder:
+    label: str
+    clashes: list[Clash]
+
+
+@dataclass(frozen=True)
+class Tree:
+    children: "list[Tree]"
+    leaf: Cased | None = None
+
+
+type Clashes = list[Clash]
 
 
 def decode(target: object, value: JsonValue) -> object:
@@ -211,6 +234,29 @@ def test_two_fields_with_the_same_json_name_fail_when_building_the_metadata() ->
             encode(value)
     assert encode(Cased(1, 2, 3)) == {"value": 1, "Value": 2}
     assert decode(Cased, {"value": 1, "Value": 2}) == Cased(1, 2)
+
+
+def test_json_names_are_checked_through_the_nested_types() -> None:
+    # 响应类型注册时的核对（ADR-0340）：沿注解走到嵌套的 dataclass，与请求类型编译解码器时同样报错；别的类型不管
+    clashing: list[object] = [
+        Clash,
+        Shadow,
+        Holder,
+        list[Clash],
+        tuple[int, Clash],
+        dict[str, Shadow],
+        Maybe[Clash],
+        Result[Clash],
+        Clash | None,
+        Annotated[Clash, "note"],
+        Clashes,
+    ]
+    for target in clashing:
+        with pytest.raises(TypeError, match="same JSON name 'value'"):
+            check_json_names(target)
+    # 自引用的 dataclass 不会死循环；区分大小写、_ 开头的字段不写；不是 dataclass 的类型不核对
+    for target in (Tree, Cased, list[Cased], int, Any, Literal["value"], set[int], Unit):
+        check_json_names(target)
 
 
 def test_encoding_rejects_values_without_a_json_form() -> None:

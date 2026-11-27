@@ -7,7 +7,7 @@ from dataclasses import KW_ONLY, dataclass
 from enum import StrEnum
 from typing import Any, Final, cast
 
-from xihan_framework._codec import DecodeError, compile_decoder, encode
+from xihan_framework._codec import DecodeError, check_json_names, compile_decoder, encode
 from xihan_framework._json import JsonTextError, JsonValue, dumps, parse
 from xihan_framework.invocation import Context, ItemKey
 from xihan_framework.pipeline import APP_OWNER, Builder, Placement, Step, func
@@ -209,7 +209,11 @@ class Descriptor:
         schema: Schema | None,
         owner: str,
     ) -> None:
-        """由 ``Registry.add`` 创建；请求类型在这里编译成解码函数，不支持的类型抛出 ``TypeError``。"""
+        """由 ``Registry.add`` 创建；请求类型在这里编译成解码函数，不支持的类型抛出 ``TypeError``。
+
+        响应类型（含嵌套的类型）里写进 JSON 的 dataclass 有两个字段同名时同样抛出 ``TypeError``（ADR-0319、ADR-0340），
+        与请求类型同一个时机，不等到调用时才以 ``KERNEL_UNEXPECTED_001`` 结束。
+        """
         self._contract = contract
         self._handler = handler
         self._request_type = request_type
@@ -217,6 +221,7 @@ class Descriptor:
         self._schema = schema
         self._owner = owner
         self._decode = compile_decoder(request_type)
+        check_json_names(response_type)
 
     @property
     def contract(self) -> Contract:
@@ -333,7 +338,8 @@ class Registry:
 
         重复抛出 ``FrameworkError``（``KERNEL_OPERATION_001`` + ``kernel.operation.duplicate``），满了抛出
         ``KERNEL_OPERATION_002`` + ``kernel.operation.registry_full``（``to_error()`` 交回带键与参数的错误），归属为空抛出
-        ``PRIMITIVES_VALIDATION_001``；请求类型不能从 JSON 解码时抛出 ``TypeError``。
+        ``PRIMITIVES_VALIDATION_001``；请求类型不能从 JSON 解码，或者请求、响应类型里的 dataclass 有两个字段写成同一个
+        JSON 名时抛出 ``TypeError``。
         """
         if not owner:
             raise FrameworkError(

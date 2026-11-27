@@ -8,7 +8,7 @@
 
 - `Result.to_json` 与 `Error.to_json` 遇到字符串里的代理项码点、从根算起嵌套超过 64 层或重复成员时抛 `ValueError`、不写出文本：写出之前去掉这类值（ADR-0320）
 - 已登记 Baggage 键的值有代理项码点时，建上下文丢弃这个成员、`with_baggage` 抛 `FrameworkError`：从外部输入拼值之前先去掉（ADR-0321）
-- dataclass 有两个字段写进 JSON 是同一个成员名（含 `json_field` 改名撞上别的字段）时，编码与以它为请求类型注册操作抛 `TypeError`，以它为响应类型的调用以 `KERNEL_UNEXPECTED_001` 结束：改掉其中一个名字（ADR-0319）
+- dataclass 有两个字段写进 JSON 是同一个成员名（含 `json_field` 改名撞上别的字段）时，编码与以它（含嵌套在内的类型）为请求或响应类型注册操作抛 `TypeError`：改掉其中一个名字（ADR-0319、ADR-0340）
 - 类型化响应有代理项码点、嵌套超过 64 层或重复成员时以 `KERNEL_UNEXPECTED_001` 结束、没有载荷：响应里不要放这类值（ADR-0318、ADR-0319）
 - `Envelope.time` 改为带时区的 `datetime | None`，不带时区抛 `FrameworkError`、给字符串抛 `TypeError`：改传 `datetime`，要文本时自己 `isoformat()`（ADR-0306）
 - `Contract` 的 `expose` 在构造时校验并存成 `operation.Expose`，单个字符串与不认识的名字抛 `FrameworkError`：写成元组 `(Expose.HTTP,)`

@@ -108,6 +108,45 @@ def _json_fields(target: type) -> list[tuple[dataclasses.Field[Any], str]]:
     return named
 
 
+def check_json_names(target: object) -> None:
+    """核对类型里写进 JSON 的 dataclass 没有两个字段同名，有即抛出 ``TypeError``（ADR-0319、ADR-0340）。
+
+    沿类型注解走到嵌套的类型：dataclass 的字段、``list`` / ``tuple`` 的元素、映射的值、``Maybe`` 与 ``Result`` 的值、联合
+    类型的各分支、``Annotated`` 的底层类型与类型别名的值，只核对其中的 dataclass，别的类型不管：编码按值的运行期类型，
+    ``encode`` 写出时照样核对。操作的响应类型在注册时经这里核对，与请求类型编译解码器时报错的时机相同（.NET 取源生成的
+    序列化元数据时即抛出，响应类型与嵌套的类型也一样）。
+    """
+    _check_json_names(target, set())
+
+
+def _check_json_names(target: object, seen: set[int]) -> None:
+    """``check_json_names`` 的递归；``seen`` 记已经走过的类型，自引用的 dataclass 不会死循环。"""
+    if id(target) in seen:
+        return
+    seen.add(id(target))
+    if isinstance(target, TypeAliasType):
+        _check_json_names(target.__value__, seen)
+        return
+    origin, arguments = get_origin(target), get_args(target)
+    if origin is not None:
+        # Literal 的参数是值不是类型；Annotated 只看底层类型；带参数的 dataclass 自己也要核对
+        if origin is not Literal:
+            for argument in arguments[:1] if origin is Annotated else arguments:
+                _check_json_names(argument, seen)
+            _check_json_names(origin, seen)
+        return
+    if not isinstance(target, type) or not dataclasses.is_dataclass(target):
+        return
+    named = _json_fields(target)
+    try:
+        hints = get_type_hints(target, include_extras=True)
+    except NameError:
+        # 注解里有解析不了的名字（如定义在函数里的类型）时只核对这一层：嵌套的值写出时 encode 仍会核对
+        return
+    for field, _ in named:
+        _check_json_names(hints.get(field.name, Any), seen)
+
+
 def encode(value: object) -> JsonValue:
     """把值编码成 JSON 值；编码不了的值抛出 ``TypeError``。"""
     if value is None or isinstance(value, (bool, int, float, str)):
