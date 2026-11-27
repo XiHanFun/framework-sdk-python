@@ -41,6 +41,11 @@ _TIMESTAMP: Final = re.compile(
 _MIN_TIMESTAMP: Final = datetime(1, 1, 1, tzinfo=UTC)
 _MAX_TIMESTAMP: Final = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
 
+# 代理项码点 U+D800–U+DFFF：str 以码点存放，成对出现的两个也各是一个码点，都编不成 UTF-8（RFC-0001「写出与转交」）
+_SURROGATE: Final = re.compile(r"[\ud800-\udfff]")
+#: 写出错误文案时替换编不成 UTF-8 的部分的字符（invocation.md §3「写出 Error 的文案」，ADR-0339）。
+_REPLACEMENT: Final = "\N{REPLACEMENT CHARACTER}"
+
 
 def to_proto_error(error: Error) -> pb.Error:
     """把原语层错误编码为协议的 ``Error``（invocation.md §3）。
@@ -49,8 +54,12 @@ def to_proto_error(error: Error) -> pb.Error:
     文本错误（``Error.literal``）写 ``text``；``details`` 按值模型写成 JSON 对象文本，没有时为空；``inner`` 递归写出。
     细节写不出（字符串里有代理项码点，或写出的文本超过 64 层）时这个错误不带细节，其余字段照写，内部错误的细节各自核对
     （RFC-0001「写出与转交」，ADR-0320）：写成转义交出去，宿主读到的是另一份细节或当作没有。
+
+    ``text`` 里的每个代理项码点（成对出现的两个也各算一个）换成一个 U+FFFD 写出，内部错误的同此（invocation.md §3「写出
+    Error 的文案」，ADR-0339）：protobuf 的字符串字段遇到代理项码点抛 ``UnicodeEncodeError``，整个错误写不出。
     """
-    text = "" if error.message_key is not None else error.message
+    # 文案是自由文本，不拿来查找或比较：按最大子部分换成 U+FFFD；str.encode('utf-8', 'replace') 换成的是 ?，不用它
+    text = "" if error.message_key is not None else _SURROGATE.sub(_REPLACEMENT, error.message)
     encoded = pb.Error(code=error.code, message_key=error.message_key or "", text=text)
     if error.details:
         with contextlib.suppress(ValueError):

@@ -18,6 +18,7 @@
 
 ### 变更
 
+- **修复** 插件写给宿主的自由文本错误文案（含内部错误的）有代理项码点时各换成 U+FFFD 写出，不再抛 `UnicodeEncodeError`、整个错误写不出（ADR-0339）
 - **新增** `Host.invoke` 的载荷也收 `str`，发出之前严格编码成 UTF-8，有代理项码点时不发请求、以 `KERNEL_VALIDATION_001` + `kernel.operation.invalid_payload` 失败（ADR-0312）
 - **修复** 回调客户端关闭之后，`Host.invoke` 与 `Host.publish` 在本地核对与载荷编码之后报 `plugins.host.unavailable`、不发请求，不再抛 grpc 的 `UsageError`（ADR-0328）
 - **修复** 插件写给宿主的错误细节有代理项码点或超过 64 层时不带细节，其余字段照写（ADR-0320）

@@ -515,6 +515,37 @@ def test_error_details_that_cannot_be_written_are_left_out() -> None:
     assert special.details == '{"a":"' + chr(0x1F600) + '","n":"NaN"}'
 
 
+def test_surrogates_in_the_text_are_written_as_replacement_characters() -> None:
+    # invocation.md §3「写出 Error 的文案」（ADR-0339）：text 里每个代理项码点换一个 U+FFFD，成对出现的两个也各换一个，
+    # 本来就是 U+FFFD 的照抄；整条错误照常写出，code、message_key、details 与 inner 照写，不再抛 UnicodeEncodeError
+    replacement = chr(0xFFFD)
+    cases = [
+        ("stale" + chr(0xD800), "stale" + replacement),
+        (chr(0xDC00) + "stale", replacement + "stale"),
+        ("a" + chr(0xDC00) + chr(0xD800) + "b", "a" + replacement * 2 + "b"),
+        ("pair " + chr(0xD83D) + chr(0xDE00), "pair " + replacement * 2),
+        ("smile " + chr(0x1F600), "smile " + chr(0x1F600)),
+        ("already " + replacement, "already " + replacement),
+    ]
+    for text, expected in cases:
+        inner = Error.literal("SAMPLES_VALIDATION_002", "inner " + text, {"id": "i1"})
+        error = Error.literal("SAMPLES_CONFLICT_001", text, {"id": "o1"}, inner)
+        # 编码成字节再解回来：核对的是线上的样子
+        written = pb.Error.FromString(to_proto_error(error).SerializeToString())
+        assert written.text == expected, ascii(text)
+        assert (written.code, written.message_key, written.details) == ("SAMPLES_CONFLICT_001", "", '{"id":"o1"}')
+        assert (written.inner.code, written.inner.text, written.inner.details) == (
+            "SAMPLES_VALIDATION_002",
+            "inner " + expected,
+            '{"id":"i1"}',
+        )
+        # 带消息键的错误不写 text，内部的自由文本错误照样替换；应答的 Status 同样写得出
+        keyed = Error.unexpected("SAMPLES_UNEXPECTED_001", "samples.failed", {"id": "o1"}, inner)
+        status = pb.Status.FromString(to_status(fail(keyed)).SerializeToString())
+        assert (status.ok, status.error.text, status.error.message_key) == (False, "", "samples.failed")
+        assert (status.error.details, status.error.inner.text) == ('{"id":"o1"}', "inner " + expected)
+
+
 def test_errors_written_by_the_host_are_read_by_the_same_rules() -> None:
     replaced = from_proto_error(
         pb.Error(
