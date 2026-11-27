@@ -24,6 +24,7 @@ REPLAYED = frozenset(
         "plugin/deadlines.json",  # test_plugin_protocol
         "plugin/envelope-times.json",  # test_plugin_protocol（valid 与 invalid：SDK 读宿主写来的 time 是同一条文法）
         "plugin/error-reading.json",  # test_plugin_protocol
+        "plugin/error-text-writing.json",  # test_plugin_protocol（codePoints 与 utf16 两组，经 to_proto_error）
         "plugin/handshake-lines.json",  # test_plugin_protocol
         "plugin/host-addresses.json",  # test_plugin_protocol
         "plugin/plugin-messages.json",  # test_plugin_protocol
